@@ -1,0 +1,117 @@
+/* SkillCheckPanel.css */
+.skc-backdrop {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0 0 80px 0;
+  pointer-events: none;
+}
+
+.skc-panel {
+  background: linear-gradient(160deg, #1a0e04, #100a02);
+  border: 1px solid rgba(200,146,42,.5);
+  border-radius: 16px 16px 12px 12px;
+  width: 100%; max-width: 360px;
+  padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 14px;
+  pointer-events: all;
+  animation: slideUp .35s cubic-bezier(0.34,1.56,0.64,1);
+  box-shadow: 0 -4px 40px rgba(200,146,42,.15), 0 8px 40px rgba(0,0,0,.6);
+}
+
+.skc-panel.dismissing {
+  animation: slideDown .3s ease forwards;
+}
+
+@keyframes slideUp   { from{transform:translateY(120%);opacity:0} to{transform:translateY(0);opacity:1} }
+@keyframes slideDown { from{transform:translateY(0);opacity:1} to{transform:translateY(120%);opacity:0} }
+
+/* Header */
+.skc-header { display:flex;align-items:center;justify-content:space-between; }
+.skc-skill-name { font-family:var(--font-display);font-size:.95rem;letter-spacing:.08em;color:var(--parch); }
+.skc-dc-badge {
+  font-family:var(--font-display);font-size:.72rem;letter-spacing:.1em;
+  padding:4px 12px;border-radius:14px;
+  background:rgba(200,60,20,.15);border:1px solid rgba(200,60,20,.4);color:#e08060;
+}
+
+/* Modifier row */
+.skc-mod-row { display:flex;gap:8px; }
+.skc-mod-item { flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:7px; }
+.skc-mod-item.total { background:rgba(200,146,42,.07);border-color:rgba(200,146,42,.2); }
+.skc-mod-item.proficient { background:rgba(78,203,113,.06);border-color:rgba(78,203,113,.2); }
+.skc-mod-label { font-size:.6rem;color:var(--parch3);font-family:var(--font-display);letter-spacing:.07em;text-transform:uppercase; }
+.skc-mod-val   { font-family:var(--font-display);font-size:.9rem;color:var(--parch); }
+.skc-mod-item.total .skc-mod-val { color:var(--gold-bright); }
+.skc-mod-item.proficient .skc-mod-val { color:#4ecb71; }
+
+/* Die */
+.skc-die-area { display:flex;flex-direction:column;align-items:center;gap:8px; }
+.skc-die-face {
+  width: 88px; height: 88px;
+  border-radius: 14px;
+  background: rgba(20,10,2,.95);
+  border: 2px solid rgba(200,146,42,.35);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 2.8rem; color: var(--gold-bright);
+  cursor: pointer; user-select: none;
+  transition: border-color .2s, box-shadow .2s;
+  box-shadow: 0 4px 20px rgba(0,0,0,.4);
+}
+.skc-die-face:hover:not(.rolled) { border-color:var(--gold);box-shadow:0 0 20px rgba(200,146,42,.3); }
+.skc-die-face.spinning { animation:diceSpin .06s linear infinite;border-color:var(--gold); }
+.skc-die-face.rolled   { border-color:var(--gold);background:rgba(200,146,42,.1); animation:dieSettle .3s ease; }
+.skc-die-face.crit     { border-color:#ffdd00;color:#ffee44;box-shadow:0 0 30px rgba(255,220,0,.4);background:rgba(255,220,0,.12); }
+.skc-die-face.fumble   { border-color:#e05050;color:#e05050;box-shadow:0 0 20px rgba(200,20,20,.3);background:rgba(200,20,20,.1); }
+.skc-die-hint { font-size:1rem;color:rgba(200,180,140,.4); }
+.skc-roll-hint { font-size:.72rem;color:var(--parch3);font-style:italic; }
+
+@keyframes diceSpin  { 0%{transform:rotate(-4deg)}50%{transform:rotate(4deg)}100%{transform:rotate(-4deg)} }
+@keyframes dieSettle { 0%{transform:scale(1.25)}70%{transform:scale(.97)}100%{transform:scale(1)} }
+
+/* Result */
+.skc-result {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 12px; border-radius: 10px;
+  background: rgba(200,146,42,.06); border: 1px solid rgba(200,146,42,.2);
+  text-align: center;
+}
+.skc-result.success { background:rgba(78,203,113,.08);border-color:rgba(78,203,113,.3); }
+.skc-result.failure { background:rgba(200,60,20,.07);border-color:rgba(200,60,20,.25); }
+.skc-result.crit    { background:rgba(255,220,0,.1);border-color:#ffdd00; }
+.skc-result.fumble  { background:rgba(200,20,20,.1);border-color:#e05050; }
+
+.skc-result-label   { font-family:var(--font-display);font-size:.78rem;letter-spacing:.1em;color:var(--gold); }
+.skc-result.crit .skc-result-label   { color:#ffee44; }
+.skc-result.fumble .skc-result-label { color:#e05050; }
+.skc-result-math    { font-family:var(--font-mono);font-size:.85rem;color:var(--parch2); }
+.skc-result-math strong { font-size:1.3rem;color:var(--parch); }
+.skc-result-vs      { font-size:.68rem;color:var(--parch3); }
+.skc-result-outcome { font-family:var(--font-display);font-size:.9rem;letter-spacing:.07em; }
+.skc-result.success .skc-result-outcome { color:#4ecb71; }
+.skc-result.failure .skc-result-outcome { color:#e05050; }
+.skc-result-margin  { font-size:.75rem;opacity:.7; }
+
+/* Actions */
+.skc-actions { display:flex;gap:8px; }
+.skc-confirm-btn {
+  flex: 2; padding:11px; border-radius:8px;
+  background:linear-gradient(135deg,rgba(200,146,42,.2),rgba(120,80,10,.2));
+  border:1px solid rgba(200,146,42,.5);
+  color:var(--gold-bright);font-family:var(--font-display);font-size:.78rem;letter-spacing:.1em;
+  cursor:pointer;transition:all .2s;
+}
+.skc-confirm-btn:hover { background:linear-gradient(135deg,rgba(200,146,42,.35),rgba(160,100,15,.3)); }
+.skc-roll-btn {
+  flex: 2; padding:11px; border-radius:8px;
+  background:rgba(200,146,42,.1);border:1px solid rgba(200,146,42,.3);
+  color:var(--gold);font-family:var(--font-display);font-size:.78rem;letter-spacing:.1em;
+  cursor:pointer;transition:all .15s;
+}
+.skc-roll-btn:hover:not(:disabled) { background:rgba(200,146,42,.2); }
+.skc-roll-btn:disabled { opacity:.4;cursor:not-allowed; }
+.skc-dismiss-btn {
+  flex:1;padding:11px;border-radius:8px;
+  background:transparent;border:1px solid var(--border);
+  color:var(--parch3);font-size:.72rem;cursor:pointer;transition:all .15s;
+}
+.skc-dismiss-btn:hover { border-color:rgba(255,255,255,.2);color:var(--parch); }

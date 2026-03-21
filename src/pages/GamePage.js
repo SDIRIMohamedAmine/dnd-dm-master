@@ -16,6 +16,7 @@ import CharacterEditModal  from '../components/CharacterEditModal'
 import CampaignSetupModal  from '../components/CampaignSetupModal'
 import CombatScreen        from '../combat/CombatScreen'
 import InventoryModal      from '../components/InventoryModal'
+import SkillCheckPanel     from '../components/SkillCheckPanel'
 import LootPanel          from '../components/LootPanel'
 import MerchantPanel      from '../components/MerchantPanel'
 import ArmorModal         from '../components/ArmorModal'
@@ -45,6 +46,7 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   const [speaking,     setSpeaking]     = useState(null)
   const [combatants,   setCombatants]   = useState(null)
   const [inCombat,     setInCombat]     = useState(false)
+  const [skillCheck,   setSkillCheck]   = useState(null)  // { skill, dc, statMod, desc }
   const [combatEnemies,  setCombatEnemies]  = useState([])
   const [showInventory,  setShowInventory]  = useState(false)
   const [lootTarget,     setLootTarget]     = useState(null)   // { name, isPickpocket }
@@ -108,6 +110,38 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     })
   }, [character?.current_hp]) // eslint-disable-line
 
+  // Detect skill check requests from DM (🎲 Skill Check — DC X)
+  useEffect(() => {
+    if (!messages.length) return
+    const lastDM = [...messages].reverse().find(m => m.role === 'assistant')
+    if (!lastDM || !character) return
+    const text = lastDM.content
+
+    // Match: "🎲 Persuasion Check — DC 14" or "🎲 Stealth Check — DC 12"
+    const checkMatch = text.match(/🎲\s+([A-Za-z\s]+?)\s+Check\s*[—–-]+\s*DC\s*(\d+)/i)
+    if (checkMatch && !skillCheck) {
+      const skill   = checkMatch[1].trim()
+      const dc      = parseInt(checkMatch[2])
+      // Determine the ability modifier for this skill
+      const skillToStat = {
+        persuasion:'charisma', deception:'charisma', intimidation:'charisma', performance:'charisma',
+        stealth:'dexterity', acrobatics:'dexterity', 'sleight of hand':'dexterity',
+        athletics:'strength',
+        perception:'wisdom', insight:'wisdom', medicine:'wisdom', survival:'wisdom', 'animal handling':'wisdom',
+        arcana:'intelligence', history:'intelligence', investigation:'intelligence', nature:'intelligence', religion:'intelligence',
+      }
+      const statKey  = skillToStat[skill.toLowerCase()] || 'charisma'
+      const statVal  = character[statKey] || 10
+      const statMod_ = Math.floor((statVal - 10) / 2)
+      const profBonus = character.proficiency_bonus || 2
+      // Check if character has proficiency (background skills or class saves)
+      const profSkills = character.skill_proficiencies || []
+      const hasProficiency = profSkills.some(s => s.toLowerCase().includes(skill.toLowerCase()))
+      const totalMod = statMod_ + (hasProficiency ? profBonus : 0)
+      setSkillCheck({ skill, dc, statMod: totalMod, statKey, rawMod: statMod_, proficient: hasProficiency })
+    }
+  }, [messages]) // eslint-disable-line
+
   // Detect combat start from DM message → switch to CombatScreen
   useEffect(() => {
     if (!messages.length) return
@@ -161,7 +195,72 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   }, [messages]) // eslint-disable-line
 
   async function getRAGContext(query) {
-    try { return buildContextBlock(await retrieveFromSupabase(query, 4)) }
+    try {
+      const lastDM    = [...messages].reverse().find(m => m.role === 'assistant')
+      const dmSnippet = lastDM?.content?.slice(0, 300) || ''
+      const combined  = [query, dmSnippet].join(' ')
+
+      // Detect what kind of context we need
+      const isMerchant  = /shop|merchant|wares|sell|buy|what do you have|for sale|tavern keeper|mage sells|alchemist|blacksmith/i.test(combined)
+      const isMonster   = /attack|combat|encounter|fight|creature|monster|beast|undead|dragon|goblin|orc|wolf|troll|vampire|quasit|demon|devil|elemental/i.test(combined)
+      const isSkillCheck = /persuade|convince|deceive|intimidate|sneak|hide|search|investigate|climb|swim|jump|steal|pickpocket|notice|perception|check|roll/i.test(combined)
+
+      const chunks = await retrieveFromSupabase(combined, 6)
+
+      // For merchants: also fetch relevant magic items
+      if (isMerchant) {
+        const { supabase } = await import('../lib/supabase')
+        const { data: magicItems } = await supabase
+          .from('knowledge_chunks')
+          .select('chunk_id, type, name, source, content')
+          .eq('type', 'magic-item')
+          .order('name')
+          .limit(8)
+        if (magicItems?.length) {
+          const seen = new Set(chunks.map(c => c.id))
+          for (const row of magicItems) {
+            if (!seen.has(row.chunk_id)) {
+              chunks.push({ id: row.chunk_id, type: row.type, name: row.name, source: row.source, text: row.content })
+              seen.add(row.chunk_id)
+            }
+          }
+        }
+      }
+
+      // For monsters: fetch full stat blocks for creatures in context
+      if (isMonster && chunks.length < 4) {
+        const { supabase } = await import('../lib/supabase')
+        // Extract potential monster names from the DM text
+        const monsterNames = dmSnippet.match(/(goblin|orc|wolf|troll|dragon|vampire|skeleton|zombie|quasit|bandit|cultist|gnoll|ogre|giant|wraith|ghoul|kobold|hobgoblin|bugbear|basilisk|medusa|harpy|manticore|owlbear|mimic)\w*/gi) || []
+        for (const name of [...new Set(monsterNames)].slice(0, 3)) {
+          const { data } = await supabase
+            .from('knowledge_chunks')
+            .select('chunk_id, type, name, source, content')
+            .eq('type', 'monster')
+            .ilike('name', `%${name}%`)
+            .limit(1)
+          if (data?.[0] && !chunks.find(c => c.id === data[0].chunk_id)) {
+            chunks.push({ id: data[0].chunk_id, type: data[0].type, name: data[0].name, source: data[0].source, text: data[0].content })
+          }
+        }
+      }
+
+      // For skill checks: fetch relevant skill descriptions
+      if (isSkillCheck) {
+        const skillMatch = combined.match(/(persuasion|deception|intimidation|stealth|perception|investigation|athletics|acrobatics|arcana|history|nature|religion|insight|medicine|survival|performance|sleight of hand|animal handling)/i)
+        if (skillMatch) {
+          const { supabase } = await import('../lib/supabase')
+          const { data } = await supabase
+            .from('knowledge_chunks')
+            .select('chunk_id, type, name, source, content')
+            .ilike('name', `%${skillMatch[1]}%`)
+            .limit(1)
+          if (data?.[0]) chunks.push({ id: data[0].chunk_id, type: data[0].type, name: data[0].name, source: data[0].source, text: data[0].content })
+        }
+      }
+
+      return buildContextBlock(chunks.slice(0, 7))
+    }
     catch { return '' }
   }
 
@@ -234,6 +333,23 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     const newGold  = (character.gold || 0) + earned
     await updateCharacterStats({ equipment: newItems, gold: newGold })
     showGameEvent({ removeItems:[itemName], goldChange: earned, newItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[], levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+  }
+
+  async function handleSkillCheckResult(roll) {
+    if (!skillCheck) return
+    const total   = roll + skillCheck.statMod
+    const success = total >= skillCheck.dc
+    const isCrit  = roll === 20
+    const isFumble = roll === 1
+
+    let resultMsg
+    if (isCrit)   resultMsg = `I rolled a Natural 20! Total: ${total} vs DC ${skillCheck.dc} — Critical Success!`
+    else if (isFumble) resultMsg = `I rolled a Natural 1. Total: ${total} vs DC ${skillCheck.dc} — Critical Failure!`
+    else if (success) resultMsg = `I rolled ${roll} + ${skillCheck.statMod} = ${total}. That's ${total - skillCheck.dc} above DC ${skillCheck.dc} — Success!`
+    else          resultMsg = `I rolled ${roll} + ${skillCheck.statMod} = ${total}. That's ${skillCheck.dc - total} below DC ${skillCheck.dc} — Failure.`
+
+    setSkillCheck(null)
+    await send(resultMsg)
   }
 
   async function handleCombatEnd({ victory, fled, narrative, xpGained, playerHP, loot }) {
@@ -503,6 +619,13 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
           onBuy={handleBuyItem}
           onSell={handleSellItem}
           onClose={() => setMerchantData(null)}
+        />
+      )}
+      {skillCheck && (
+        <SkillCheckPanel
+          check={skillCheck}
+          onResult={handleSkillCheckResult}
+          onDismiss={() => setSkillCheck(null)}
         />
       )}
       {showInventory && character && (

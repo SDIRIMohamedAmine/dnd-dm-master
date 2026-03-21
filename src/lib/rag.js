@@ -197,20 +197,97 @@ function tokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w=>w.length>2&&!STOP_WORDS.has(w))
 }
 
-export async function retrieveFromSupabase(query, topK=5) {
+// Extract the most meaningful search terms from a player message.
+// Prioritises capitalised proper nouns, spell names, monster names, item names.
+function extractSearchTerms(query) {
+  // 1. Pull capitalised words (likely names: Fireball, Goblin, Longsword)
+  const capitals = (query.match(/\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*/g) || [])
+    .filter(w => !['The','And','But','You','Your','With','From','That','This','When','Where','What','Into','Over'].includes(w))
+
+  // 2. Known D&D keyword patterns
+  const dndKeywords = (query.match(
+    /\b(fireball|magic missile|cure wounds|healing word|eldritch blast|sacred flame|toll the dead|guiding bolt|thunderwave|shatter|hex|bless|shield|misty step|counterspell|burning hands|hold person|invisibility|fly|haste|polymorph|greater invisibility|banishment|wall of fire|disintegrate|power word|wish|goblin|orc|wolf|troll|dragon|vampire|zombie|skeleton|bandit|cultist|guard|gnoll|ogre|giant|wraith|specter|ghoul|ghast|wight|mummy|lich|beholder|mind flayer|drow|duergar|hobgoblin|kobold|bugbear|werewolf|werebear|basilisk|medusa|harpy|manticore|griffon|hippogriff|owlbear|displacer beast|rust monster|mimic|gelatinous cube|longsword|shortsword|rapier|dagger|greataxe|greatsword|handaxe|quarterstaff|mace|warhammer|shortbow|longbow|chain mail|leather armor|plate|shield|spell|attack|rage|sneak attack|divine smite|channel divinity|wild shape|bardic inspiration|ki|second wind|action surge|lay on hands)/gi
+  ) || [])
+
+  // 3. Multi-word phrases (2-3 words) are often item/spell names
+  const phrases = []
+  const words = query.split(/\s+/)
+  for (let i = 0; i < words.length - 1; i++) {
+    const bi = `${words[i]} ${words[i+1]}`.replace(/[^a-zA-Z ]/g,'').trim()
+    if (bi.length > 5) phrases.push(bi)
+    if (i < words.length - 2) {
+      const tri = `${words[i]} ${words[i+1]} ${words[i+2]}`.replace(/[^a-zA-Z ]/g,'').trim()
+      if (tri.length > 8) phrases.push(tri)
+    }
+  }
+
+  // 4. Fallback: all meaningful tokens
   const tokens = tokenize(query)
-  if (!tokens.length) return []
-  const {data:nameMatches} = await supabase.from('knowledge_chunks').select('chunk_id,type,name,source,content').ilike('name',`%${tokens[0]}%`).limit(topK*2)
-  const {data:contentMatches} = await supabase.from('knowledge_chunks').select('chunk_id,type,name,source,content').textSearch('content',tokens.slice(0,3).join(' | '),{type:'websearch'}).limit(topK*2).catch(()=>({data:[]}))
-  const all=[...(nameMatches||[]),...(contentMatches||[])]
-  const seen=new Set()
-  const unique=all.filter(r=>{if(seen.has(r.chunk_id))return false;seen.add(r.chunk_id);return true})
-  const scored=unique.map(row=>{
-    const nl=row.name.toLowerCase();const cl=row.content.toLowerCase();let score=0
-    for(const t of tokens){if(nl===t)score+=8;else if(nl.includes(t))score+=4;if(cl.includes(t))score+=1}
-    return{row,score}
+
+  // Deduplicate and prioritise: capitals > dndKeywords > phrases > tokens
+  const seen = new Set()
+  const result = []
+  for (const t of [...capitals, ...dndKeywords, ...phrases, ...tokens]) {
+    const key = t.toLowerCase()
+    if (!seen.has(key) && key.length > 2) { seen.add(key); result.push(t) }
+  }
+  return result.slice(0, 8)
+}
+
+export async function retrieveFromSupabase(query, topK=5) {
+  const terms = extractSearchTerms(query)
+  if (!terms.length) return []
+
+  const allRows = []
+
+  // Run parallel name searches for the top terms
+  // Searching multiple terms gives much better recall than only tokens[0]
+  const nameSearches = terms.slice(0, 4).map(term =>
+    supabase.from('knowledge_chunks')
+      .select('chunk_id,type,name,source,content')
+      .ilike('name', `%${term}%`)
+      .limit(topK)
+  )
+  const nameResults = await Promise.all(nameSearches)
+  for (const {data} of nameResults) if (data) allRows.push(...data)
+
+  // Full-text search on content using the top meaningful terms
+  const ftQuery = terms.slice(0, 5).join(' | ')
+  const {data: ftData} = await supabase
+    .from('knowledge_chunks')
+    .select('chunk_id,type,name,source,content')
+    .textSearch('content', ftQuery, {type:'websearch'})
+    .limit(topK * 2)
+    .catch(() => ({data:[]}))
+  if (ftData) allRows.push(...ftData)
+
+  // Deduplicate
+  const seen = new Set()
+  const unique = allRows.filter(r => {
+    if (seen.has(r.chunk_id)) return false
+    seen.add(r.chunk_id); return true
   })
-  return scored.sort((a,b)=>b.score-a.score).slice(0,topK).map(s=>({id:s.row.chunk_id,type:s.row.type,name:s.row.name,source:s.row.source,text:s.row.content}))
+
+  // Score: exact name match scores highest, then partial, then content hits
+  const termsLower = terms.map(t => t.toLowerCase())
+  const scored = unique.map(row => {
+    const nl = row.name.toLowerCase()
+    const cl = row.content.toLowerCase()
+    let score = 0
+    for (const t of termsLower) {
+      if (nl === t)            score += 12  // exact name match
+      else if (nl.startsWith(t) || t.startsWith(nl)) score += 8  // prefix match
+      else if (nl.includes(t)) score += 5  // partial name
+      if (cl.includes(t))      score += 1  // content mention
+    }
+    return {row, score}
+  })
+
+  return scored
+    .filter(s => s.score > 0)
+    .sort((a,b) => b.score - a.score)
+    .slice(0, topK)
+    .map(s => ({id:s.row.chunk_id, type:s.row.type, name:s.row.name, source:s.row.source, text:s.row.content}))
 }
 
 export function buildContextBlock(chunks) {
@@ -253,18 +330,109 @@ function parseMonsterChunk(row) {
   return{name:row.name,hp,maxHp:hp,ac,cr,xp:crXP[cr]||200,str:stats.str||10,dex:stats.dex||10,con:stats.con||10,int:stats.int||10,wis:stats.wis||10,cha:stats.cha||10,speed:30,attacks:attacks.length?attacks:[{name:'Attack',bonus:3,damage:'1d6+2',type:'slashing'}],flavor:['moves aggressively','strikes with precision'],fromDatabase:true}
 }
 
-export async function selectEncounterMonsters(character,difficulty='medium') {
-  const level=character.level||1;const hp=character.current_hp||character.max_hp||10;const maxHP=character.max_hp||10
-  const SOLO_BUDGETS={easy:[6,12,18,31,62,93,125,156,200,250],medium:[12,25,37,62,125,187,250,312,400,500],hard:[18,37,56,93,187,281,375,468,600,750]}
-  let budget=(SOLO_BUDGETS[difficulty]||SOLO_BUDGETS.medium)[Math.min(level-1,9)]
-  if(hp/maxHP<0.5) budget=SOLO_BUDGETS.easy[Math.min(level-1,9)]
-  const crRange=level<=1?['0','1/8','1/4']:level<=2?['1/8','1/4','1/2']:level<=4?['1/4','1/2','1']:level<=6?['1/2','1','2']:['1','2','3']
-  const crXP={'0':10,'1/8':25,'1/4':50,'1/2':100,'1':200,'2':450,'3':700}
-  let candidates=[]
-  for(const cr of crRange){const xp=crXP[cr]||50;if(xp>budget*2)continue;const{data}=await supabase.from('knowledge_chunks').select('name,content').eq('type','monster').ilike('content',`%CR: ${cr}%`).limit(15);if(data?.length)candidates.push(...data.map(d=>({name:d.name,cr,xp})))}
-  if(!candidates.length) return level<=2?['Goblin','Wolf']:level<=4?['Orc','Gnoll']:['Ogre','Ghoul']
-  candidates=candidates.sort(()=>Math.random()-0.5)
-  const encounter=[];let usedXP=0
-  for(const c of candidates){const mult=[1,1.5,2,2.5][Math.min(encounter.length,3)];if(usedXP+c.xp*mult<=budget){encounter.push(c.name);usedXP+=c.xp}if(encounter.length>=3)break}
-  return encounter.length?encounter:[candidates[0].name]
+// CR value → XP
+const CR_XP = {'0':10,'1/8':25,'1/4':50,'1/2':100,'1':200,'2':450,'3':700,'4':1100,'5':1800,'6':2300,'7':2900,'8':3900,'9':5000,'10':5900}
+
+// Parse CR from monster chunk text — handles "CR: 1/4", "CR: 0.25", "challenge_rating: 0.25"
+function parseCRFromText(text) {
+  // Try "CR: X" format (Open5e stores as fraction string)
+  const crMatch = text.match(/CR:\s*([0-9/]+)/)
+  if (crMatch) return crMatch[1].trim()
+  // Try decimal format
+  const decMatch = text.match(/challenge_rating[:\s]+([0-9.]+)/)
+  if (decMatch) {
+    const dec = parseFloat(decMatch[1])
+    if (dec === 0)    return '0'
+    if (dec <= 0.125) return '1/8'
+    if (dec <= 0.25)  return '1/4'
+    if (dec <= 0.5)   return '1/2'
+    return String(Math.round(dec))
+  }
+  return null
+}
+
+// XP budget for CR value
+function crToXP(cr) {
+  return CR_XP[cr] || 50
+}
+
+export async function selectEncounterMonsters(character, difficulty='medium') {
+  const level  = character.level || 1
+  const hp     = character.current_hp || character.max_hp || 10
+  const maxHP  = character.max_hp || 10
+
+  const SOLO_BUDGETS = {
+    easy:   [6,  12, 18, 31,  62, 93,  125, 156, 200, 250],
+    medium: [12, 25, 37, 62,  125,187, 250, 312, 400, 500],
+    hard:   [18, 37, 56, 93,  187,281, 375, 468, 600, 750],
+  }
+  let budget = (SOLO_BUDGETS[difficulty] || SOLO_BUDGETS.medium)[Math.min(level-1,9)]
+  if (hp/maxHP < 0.5) budget = SOLO_BUDGETS.easy[Math.min(level-1,9)]
+
+  // CR ranges by level
+  const crRange = level<=1 ? ['0','1/8','1/4']
+    : level<=2 ? ['1/8','1/4','1/2']
+    : level<=4 ? ['1/4','1/2','1']
+    : level<=6 ? ['1/2','1','2']
+    : level<=9 ? ['1','2','3']
+    : ['2','3','4','5']
+
+  let candidates = []
+
+  // Search with multiple CR format variants to handle data inconsistencies
+  for (const cr of crRange) {
+    const xp = crToXP(cr)
+    if (xp > budget * 2) continue
+
+    // Build search variants: "CR: 1/4", "CR: 0.25", "CR: .25"
+    const decVal = cr === '1/8' ? '0.125' : cr === '1/4' ? '0.25' : cr === '1/2' ? '0.5' : cr
+    const searches = [
+      supabase.from('knowledge_chunks').select('name,content').eq('type','monster').ilike('content',`%CR: ${cr}%`).limit(12),
+      supabase.from('knowledge_chunks').select('name,content').eq('type','monster').ilike('content',`%CR: ${decVal}%`).limit(8),
+    ]
+    const results = await Promise.all(searches)
+    for (const {data} of results) {
+      if (!data?.length) continue
+      for (const row of data) {
+        // Double-check the parsed CR matches what we want (avoid false positives)
+        const parsedCR = parseCRFromText(row.content)
+        if (parsedCR === cr || crToXP(parsedCR) === xp) {
+          candidates.push({ name: row.name, cr: parsedCR || cr, xp })
+        }
+      }
+    }
+  }
+
+  // Fallback to well-known monsters if DB has nothing
+  if (!candidates.length) {
+    const fallbacks = level<=1 ? ['Goblin','Giant Rat','Kobold']
+      : level<=3 ? ['Orc','Gnoll','Ghoul']
+      : level<=6 ? ['Ogre','Troll','Wight']
+      : ['Stone Giant','Vampire Spawn','Adult Blue Dragon']
+    return fallbacks
+  }
+
+  // Deduplicate by name
+  const seen = new Set()
+  candidates = candidates.filter(c => {
+    if (seen.has(c.name)) return false
+    seen.add(c.name); return true
+  })
+
+  // Shuffle then build encounter within XP budget
+  candidates = candidates.sort(() => Math.random() - 0.5)
+  const encounter = []
+  let usedXP = 0
+  const multipliers = [1, 1.5, 2, 2.5]
+
+  for (const c of candidates) {
+    const mult = multipliers[Math.min(encounter.length, 3)]
+    if (usedXP + c.xp * mult <= budget) {
+      encounter.push(c.name)
+      usedXP += c.xp
+    }
+    if (encounter.length >= 3) break
+  }
+
+  return encounter.length ? encounter : [candidates[0].name]
 }

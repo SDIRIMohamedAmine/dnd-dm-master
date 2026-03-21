@@ -312,7 +312,7 @@ export default function LibraryPage({ onBack }) {
             </button>
           ))}
           {loading&&<div className="lib-loading">Loading…</div>}
-          {!loading&&results.length===0&&<div className="lib-empty">No entries found.{!search&&dbCount===0?' Run the Knowledge Base setup first.':''}</div>}
+          {!loading&&results.length===0&&<div className="lib-empty">No entries found. Run the Knowledge Base setup first if the library is empty.</div>}
           {hasMore&&!loading&&<button className="lib-more-btn" onClick={loadMore}>Load more…</button>}
         </div>
       </div>
