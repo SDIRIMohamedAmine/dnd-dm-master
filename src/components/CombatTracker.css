@@ -1,0 +1,99 @@
+.combat-tracker {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(14,6,2,0.96);
+  border: 1px solid rgba(200,60,20,0.5);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  min-width: 280px;
+  max-width: 360px;
+  z-index: 150;
+  box-shadow: 0 4px 30px rgba(0,0,0,0.6), 0 0 20px rgba(200,60,20,0.15);
+  animation: fadeUp 0.25s ease;
+}
+
+.ct-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid rgba(200,60,20,0.3);
+}
+
+.ct-title {
+  font-family: var(--font-display);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  color: #e06040;
+  text-transform: uppercase;
+}
+
+.ct-close {
+  background: none;
+  border: none;
+  color: var(--parch3);
+  font-size: 0.78rem;
+  cursor: pointer;
+  padding: 0 4px;
+  transition: color .15s;
+}
+.ct-close:hover { color: var(--parch); }
+
+.ct-list {
+  padding: 8px 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.ct-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px;
+  transition: background 0.15s;
+}
+
+.ct-row.active  { background: rgba(200,60,20,0.12); }
+.ct-row.player  { }
+.ct-row.dead    { opacity: 0.4; }
+
+.ct-initiative {
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  color: var(--gold-dim);
+  width: 22px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.ct-row.active .ct-initiative { color: var(--gold-bright); }
+
+.ct-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ct-name {
+  font-size: 0.78rem;
+  color: var(--parch2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ct-row.active .ct-name  { color: var(--parch); font-family: var(--font-display); }
+.ct-row.player .ct-name  { color: #a0c8ff; }
+
+.ct-hp-bar-wrap { height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden; }
+.ct-hp-bar { height: 100%; border-radius: 2px; transition: width 0.4s, background 0.3s; }
+
+.ct-hp-text {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  flex-shrink: 0;
+  white-space: nowrap;
+}

@@ -1,0 +1,24 @@
+.conditions-wrap { display:flex;flex-direction:column;gap:7px; }
+.conditions-active { display:flex;flex-wrap:wrap;gap:5px; }
+.condition-badge {
+  display:flex;align-items:center;gap:4px;
+  padding:3px 8px;border-radius:12px;
+  background:rgba(255,255,255,.05);
+  border:1px solid;
+  font-size:.7rem;color:var(--parch2);
+}
+.condition-remove {
+  background:none;border:none;color:rgba(255,255,255,.4);
+  font-size:.75rem;cursor:pointer;padding:0 0 0 2px;line-height:1;
+  transition:color .15s;
+}
+.condition-remove:hover { color:#e05050; }
+.conditions-add { }
+.condition-select {
+  width:100%;background:var(--surface-1);border:1px solid var(--border);
+  border-radius:var(--radius-md);padding:5px 8px;
+  color:var(--parch3);font-size:.72rem;outline:none;cursor:pointer;
+  font-family:var(--font-body);
+}
+.condition-select:focus { border-color:var(--border-hi); }
+.condition-select option { background:#1a0c04; }

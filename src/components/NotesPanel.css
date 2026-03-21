@@ -1,0 +1,13 @@
+.notes-panel { display:flex;flex-direction:column;height:100%;padding:14px 12px; }
+.notes-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:8px; }
+.notes-title  { font-family:var(--font-display);font-size:.72rem;letter-spacing:.12em;color:var(--gold);text-transform:uppercase; }
+.notes-status { font-size:.65rem;color:var(--teal-bright);font-family:var(--font-mono);transition:opacity .3s; }
+.notes-textarea {
+  flex:1;background:rgba(255,255,255,.04);border:1px solid var(--border);
+  border-radius:var(--radius-md);padding:10px 12px;
+  color:var(--parch2);font-family:var(--font-body);font-size:.85rem;
+  line-height:1.65;resize:none;outline:none;transition:border-color .15s;
+  min-height:200px;
+}
+.notes-textarea:focus { border-color:var(--border-hi); }
+.notes-textarea::placeholder { color:rgba(184,168,130,.3);font-style:italic; }

@@ -1,0 +1,10 @@
+.sst-container { display:flex;flex-direction:column;gap:5px; }
+.sst-row { display:flex;align-items:center;gap:7px; }
+.sst-label { font-family:var(--font-mono);font-size:.62rem;color:var(--parch3);width:44px;flex-shrink:0; }
+.sst-pips  { display:flex;gap:4px;flex:1;flex-wrap:wrap; }
+.sst-pip   { width:14px;height:14px;border-radius:50%;cursor:pointer;border:1px solid;transition:all .15s; }
+.sst-pip.available { background:rgba(100,150,255,.5);border-color:rgba(100,150,255,.7); }
+.sst-pip.available:hover { background:rgba(100,150,255,.8);transform:scale(1.15); }
+.sst-pip.used { background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.15); }
+.sst-pip.used:hover { background:rgba(100,150,255,.2);border-color:rgba(100,150,255,.4); }
+.sst-count { font-family:var(--font-mono);font-size:.62rem;color:var(--parch3);width:28px;text-align:right;flex-shrink:0; }
