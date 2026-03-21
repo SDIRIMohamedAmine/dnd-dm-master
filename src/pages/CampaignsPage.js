@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
 import './CampaignsPage.css'
 
-export default function CampaignsPage({ onSelect, onNew, onRAGSetup }) {
+export default function CampaignsPage({ onSelect, onNew, onRAGSetup, onLibrary }) {
   const { user, signOut } = useAuth()
   const [campaigns, setCampaigns] = useState([])
   const [loading,   setLoading]   = useState(true)
@@ -46,7 +46,8 @@ export default function CampaignsPage({ onSelect, onNew, onRAGSetup }) {
         </div>
         <div className="campaigns-header-right">
           <button className="btn-new" onClick={onNew}>+ New Campaign</button>
-          <button className="btn-rag-setup" onClick={onRAGSetup}>⚙ D&amp;D Lore Setup</button>
+          <button className="btn-rag-setup" onClick={onRAGSetup}>⚙ Lore Setup</button>
+          <button className="btn-rag-setup" onClick={onLibrary} style={{marginLeft:6}}>📖 SRD Library</button>
           <button className="btn-signout" onClick={signOut}>Sign out</button>
         </div>
       </header>

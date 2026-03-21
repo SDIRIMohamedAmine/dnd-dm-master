@@ -1,79 +1,116 @@
-// src/App.js
+// src/App.js — with React Router routing
 import { useState } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { AuthProvider, useAuth } from './lib/AuthContext'
 import AuthPage          from './pages/AuthPage'
 import CampaignsPage     from './pages/CampaignsPage'
 import CharacterCreation from './pages/CharacterCreation'
 import GamePage          from './pages/GamePage'
 import RAGIngestion      from './pages/RAGIngestion'
+import LibraryPage       from './pages/LibraryPage'
 import { supabase }      from './lib/supabase'
 import './App.css'
 
+// ── Route-aware inner app ──────────────────────────────────
 function InnerApp() {
   const { user } = useAuth()
-  const [view,            setView]            = useState('campaigns')
-  const [campaignId,      setCampaignId]      = useState(null)
-  const [campaignTitle,   setCampaignTitle]   = useState('')
-  const [campaignObj,     setCampaignObj]     = useState({})
+  const navigate  = useNavigate()
 
+  // ── New campaign ──────────────────────────────────────────
   async function handleNewCampaign() {
-    const title = `Adventure — ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
-    const { data, error } = await supabase
-      .from('campaigns').insert({ user_id: user.id, title }).select().single()
+    const title = `Adventure — ${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'})}`
+    const { data, error } = await supabase.from('campaigns').insert({ user_id:user.id, title }).select().single()
     if (error) { alert(error.message); return }
-    setCampaignId(data.id)
-    setCampaignTitle(data.title)
-    setCampaignObj(data)
-    setView('character-creation')
+    navigate(`/campaign/${data.id}/create`)
   }
 
   async function handleSelectCampaign(id) {
-    const { data: camp } = await supabase.from('campaigns').select('title').eq('id', id).single()
-    const { data: char } = await supabase.from('characters').select('id').eq('campaign_id', id).single()
-    setCampaignId(id)
-    setCampaignTitle(camp?.title || 'Adventure')
-    setCampaignObj(camp || {})
-    setView(char ? 'game' : 'character-creation')
+    const { data:char } = await supabase.from('characters').select('id').eq('campaign_id',id).single()
+    navigate(char ? `/campaign/${id}/play` : `/campaign/${id}/create`)
   }
 
-  async function handleCharacterComplete(charData) {
-    const { error } = await supabase.from('characters')
-      .insert({ ...charData, campaign_id: campaignId, user_id: user.id })
+  async function handleCharacterComplete(charData, campaignId) {
+    const { data:camp } = await supabase.from('campaigns').select('title').eq('id',campaignId).single()
+    const { error } = await supabase.from('characters').insert({ ...charData, campaign_id:campaignId, user_id:user.id })
     if (error) throw error
-    await supabase.from('campaigns')
-      .update({ title: `${charData.name}'s Adventure` }).eq('id', campaignId)
-    setCampaignTitle(`${charData.name}'s Adventure`)
-    setView('game')
+    await supabase.from('campaigns').update({ title:`${charData.name}'s Adventure` }).eq('id',campaignId)
+    navigate(`/campaign/${campaignId}/play`)
   }
 
-  if (view === 'rag-setup')         return <RAGIngestion onDone={() => setView('campaigns')} />
-  if (view === 'campaigns')         return <CampaignsPage onSelect={handleSelectCampaign} onNew={handleNewCampaign} onRAGSetup={() => setView('rag-setup')} />
-  if (view === 'character-creation') return <CharacterCreation campaignTitle={campaignTitle} onComplete={handleCharacterComplete} onBack={() => setView('campaigns')} />
-  if (view === 'game')              return <GamePage
-    campaignId={campaignId}
-    userId={user.id}
-    campaignTitle={campaignTitle}
-    campaign={campaignObj}
-    onBack={() => setView('campaigns')}
-    onCampaignUpdate={(updated) => { setCampaignObj(prev => ({...prev, ...updated})); if (updated.title) setCampaignTitle(updated.title) }}
-  />
-  return null
+  return (
+    <Routes>
+      <Route path="/"              element={<Navigate to="/campaigns" replace />} />
+      <Route path="/campaigns"     element={<CampaignsPage onSelect={handleSelectCampaign} onNew={handleNewCampaign} onRAGSetup={()=>navigate('/rag-setup')} onLibrary={()=>navigate('/library')} />} />
+      <Route path="/rag-setup"     element={<RAGIngestion onDone={()=>navigate('/campaigns')} />} />
+      <Route path="/library"       element={<LibraryPage onBack={()=>navigate('/campaigns')} />} />
+      <Route path="/campaign/:id/create" element={<CreateRoute onComplete={handleCharacterComplete} onBack={()=>navigate('/campaigns')} />} />
+      <Route path="/campaign/:id/play"   element={<PlayRoute onBack={()=>navigate('/campaigns')} />} />
+      <Route path="*"              element={<Navigate to="/campaigns" replace />} />
+    </Routes>
+  )
+}
+
+function CreateRoute({ onComplete, onBack }) {
+  const { id } = useParams()
+  const [title, setTitle] = useState(null)
+
+  useState(() => {
+    supabase.from('campaigns').select('title').eq('id',id).single()
+      .then(({data}) => setTitle(data?.title||'New Campaign'))
+  }, [id])
+
+  return (
+    <CharacterCreation
+      campaignTitle={title||'New Campaign'}
+      onComplete={(charData) => onComplete(charData, id)}
+      onBack={onBack}
+    />
+  )
+}
+
+function PlayRoute({ onBack }) {
+  const { id } = useParams()
+  const { user } = useAuth()
+  const navigate  = useNavigate()
+  const [camp, setCamp] = useState(null)
+
+  useState(() => {
+    supabase.from('campaigns').select('*').eq('id',id).single()
+      .then(({data}) => setCamp(data))
+  }, [id])
+
+  if (!camp) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--parch3)',fontFamily:'var(--font-display)',fontSize:'.85rem',letterSpacing:'.1em'}}>Loading…</div>
+
+  return (
+    <GamePage
+      campaignId={id}
+      userId={user.id}
+      campaignTitle={camp.title}
+      campaign={camp}
+      onBack={onBack}
+      onCampaignUpdate={(updated) => setCamp(prev=>({...prev,...updated}))}
+    />
+  )
+}
+
+// ── Root with auth gate ────────────────────────────────────
+function RootGate() {
+  const { user, loading } = useAuth()
+  if (loading) return (
+    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--parch3)',fontFamily:'var(--font-display)',fontSize:'.85rem',letterSpacing:'.1em'}}>
+      Loading…
+    </div>
+  )
+  if (!user) return <AuthPage />
+  return <InnerApp />
 }
 
 export default function App() {
   return (
-    <AuthProvider>
-      <RootGate />
-    </AuthProvider>
+    <BrowserRouter>
+      <AuthProvider>
+        <RootGate />
+      </AuthProvider>
+    </BrowserRouter>
   )
-}
-
-function RootGate() {
-  const { user, loading } = useAuth()
-  if (loading) return (
-    <div style={{ display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--parch3)',fontFamily:'var(--font-display)',fontSize:'0.85rem',letterSpacing:'0.1em' }}>
-      Loading…
-    </div>
-  )
-  return user ? <InnerApp /> : <AuthPage />
 }
