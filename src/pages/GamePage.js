@@ -3,6 +3,10 @@ import { useState, useRef, useEffect } from 'react'
 import { useCampaign } from '../hooks/useCampaign'
 import { callDM, callOpeningScene, cleanDMText } from '../lib/openrouter'
 import { retrieveFromSupabase, buildContextBlock, lookupMonsterStats, selectEncounterMonsters } from '../lib/rag'
+import {
+  generateStoryArcs, loadStoryArcs, getDominantArc,
+  extractArcDeltas, updateArcPower, buildArcPromptBlock, fetchArcLore,
+} from '../lib/storyArcs'
 import DiceRoller          from '../components/DiceRoller'
 import LevelUpModal        from '../components/LevelUpModal'
 import RestModal           from '../components/RestModal'
@@ -17,6 +21,7 @@ import CampaignSetupModal  from '../components/CampaignSetupModal'
 import CombatScreen        from '../combat/CombatScreen'
 import InventoryModal      from '../components/InventoryModal'
 import SkillCheckPanel     from '../components/SkillCheckPanel'
+import ArcStatus           from '../components/ArcStatus'
 import LootPanel          from '../components/LootPanel'
 import MerchantPanel      from '../components/MerchantPanel'
 import ArmorModal         from '../components/ArmorModal'
@@ -54,6 +59,9 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   const [showArmor,     setShowArmor]     = useState(false)
   const [monsterContext, setMonsterContext] = useState('')
   const [suggestedMonsters, setSuggestedMonsters] = useState([])
+  const [storyArcs,        setStoryArcs]        = useState([])
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(false)
+  const [arcsInitialized,  setArcsInitialized]  = useState(false)
   const lastCombatMsgId = useRef(null)
   const [campaignData, setCampaignData] = useState(campaign || {})
   const bottomRef    = useRef(null)
@@ -79,6 +87,24 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       .then(monsters => setSuggestedMonsters(monsters))
       .catch(() => {})
   }, [character?.level, character?.current_hp]) // eslint-disable-line
+
+  // Load or generate story arcs
+  useEffect(() => {
+    if (!character || !campaignId || arcsInitialized) return
+    setArcsInitialized(true)
+    const { user } = JSON.parse(localStorage.getItem('supabase_user') || '{}')
+    loadStoryArcs(campaignId).then(async arcs => {
+      if (arcs.length > 0) {
+        setStoryArcs(arcs)
+      } else if (character && messages.length >= 2) {
+        // Generate arcs after first real exchange so we have context
+        try {
+          const generated = await generateStoryArcs(campaignId, userId, character, campaignData)
+          setStoryArcs(generated)
+        } catch (e) { console.warn('[Arcs] Generation failed:', e.message) }
+      }
+    })
+  }, [character, campaignId, messages.length >= 2]) // eslint-disable-line
 
   // FIX: Restore combat state from Supabase on load (survives refresh)
   useEffect(() => {
@@ -476,12 +502,40 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       await saveMessage('user', content)
       const ragContext = await getRAGContext(content)
       const history    = [...messages, { role: 'user', content }]
-      const reply      = await callDM({ messages: history, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters })
+      const reply      = await callDM({ messages: history, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters, storyArcs })
       const clean      = cleanDMText(reply)
       await saveMessage('assistant', clean)
       const { events } = await processDMReply(reply, content)
       showGameEvent(events)
       if (events.levelUp) setLevelUpData({ newLevel: events.levelUp })
+
+      // Update story arc powers every 8 messages (not every 3) to save API quota
+      const msgCount = messages.length
+      if (storyArcs.length > 0 && msgCount % 8 === 0) {
+        extractArcDeltas(content, reply, storyArcs).then(deltas => {
+          if (!deltas?.length) return
+          setStoryArcs(prev => {
+            const updated = [...prev]
+            for (const delta of deltas) {
+              const arc = updated.find(a => a.arc_key === delta.arc_key)
+              if (arc) {
+                arc.power = Math.min(100, Math.max(0, arc.power + delta.delta))
+                // Update in DB asynchronously
+                updateArcPower(campaignId, arc.id, arc.arc_key, delta.delta, delta.reason)
+                  .catch(() => {})
+              }
+            }
+            return updated.sort((a, b) => b.power - a.power)
+          })
+        }).catch(() => {})
+
+        // Generate arcs if we have messages but no arcs yet
+        if (storyArcs.length === 0 && messages.length >= 2) {
+          generateStoryArcs(campaignId, userId, character, campaignData)
+            .then(arcs => { if (arcs?.length) setStoryArcs(arcs) })
+            .catch(() => {})
+        }
+      }
     } catch (err) { setError(err.message) }
     finally { setSending(false); setTimeout(() => inputRef.current?.focus(), 50) }
   }
@@ -495,7 +549,7 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       const filteredHistory = messages.slice(0, -1)
       const lastUserMsg     = filteredHistory.filter(m => m.role === 'user').slice(-1)[0]?.content || ''
       const ragContext      = await getRAGContext(lastUserMsg)
-      const reply  = await callDM({ messages: filteredHistory, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters })
+      const reply  = await callDM({ messages: filteredHistory, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters, storyArcs })
       const clean  = cleanDMText(reply)
       await saveMessage('assistant', clean)
       const { events } = await processDMReply(reply, lastUserMsg)
@@ -679,6 +733,9 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
           <button className="game-sidebar-btn" onClick={() => setShowInventory(true)}>🎒 Items</button>
 
           <button className="game-sidebar-btn" onClick={() => setShowArmor(true)}>🛡️ Armor</button>
+          {storyArcs.length > 0 && (
+            <button className="game-sidebar-btn" onClick={() => setSidebar(prev => prev === 'arcs' ? null : 'arcs')}>🌍 World</button>
+          )}
           {inCombat && (
             <button
               className={`game-sidebar-btn combat-active-btn`}
@@ -760,7 +817,12 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
           </div>
 
           {!sending && lastDMMessage && (
-            <SuggestedActions lastDMMessage={lastDMMessage} characterName={character?.name} onSelect={send} disabled={sending} />
+            <><div style={{ display: 'flex', alignItems: 'center', marginBottom: 3 }}>
+              <button
+                style={{ fontSize: '.62rem', padding: '2px 8px', background: 'transparent', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--parch3)', cursor: 'pointer' }}
+                onClick={() => setSuggestionsEnabled(p => !p)}
+              >{suggestionsEnabled ? '💡 Suggestions ON' : '💡 Suggestions OFF'}</button>
+            </div><SuggestedActions lastDMMessage={lastDMMessage} characterName={character?.name} onSelect={send} disabled={sending} enabled={suggestionsEnabled} /></>
           )}
 
           <div className="game-input-area">

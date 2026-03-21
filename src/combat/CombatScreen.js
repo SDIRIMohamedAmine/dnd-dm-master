@@ -1,12 +1,18 @@
-// src/combat/CombatScreen.js
+// src/combat/CombatScreen.js — Full Combat System v2
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   roll, rollDice, rollMultiple, abilityMod, modStr,
   resolveAttack, resolveSave, buildLogEntry,
   getMonsterStats, buildCustomMonster, rollLoot,
+  STATUS_EFFECTS, applyStatusTick, ENEMY_SPELLS, getEnemySpellList,
+  getSpellDef,
 } from './engine'
+import {
+  fetchSpell, getDamageDiceForSlot, getHealDiceForSlot,
+  spellNeedsEnemyTarget, spellIsSelfCast,
+} from './spellResolver'
 import { CLASS_BONUS_ACTIONS } from '../lib/classData'
-import { getItem, applyItemEffect, rollHealDice, ITEM_CATEGORIES } from '../lib/items'
+import { getItem, ITEM_CATEGORIES } from '../lib/items'
 import { callAI } from '../lib/openrouter'
 import { lookupMonsterStats } from '../lib/rag'
 import './CombatScreen.css'
@@ -21,43 +27,68 @@ function statBlock(char) {
     int: char.intelligence, wis: char.wisdom, cha: char.charisma,
     profBonus: char.proficiency_bonus || 2,
     isPlayer: true,
+    statusEffects: [], // { effectId, name, duration, icon, color }
   }
+}
+
+// ── Targeting modes ──────────────────────────────────────────
+const TARGET_MODE = {
+  SINGLE_ENEMY: 'single_enemy',
+  SELF: 'self',
+  AOE: 'aoe',           // all enemies
+  MULTI: 'multi',       // select multiple manually
+  DART: 'dart',         // assign darts/rays to specific targets
 }
 
 export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
   const initEnemies = useCallback(() =>
     (enemyNames || []).map((nameStr, i) => {
-      // Use local stat block as placeholder — DB lookup happens async in useEffect
       const found = getMonsterStats(nameStr)
       const base  = found || buildCustomMonster(nameStr, null, character.level || 1)
-      return { ...base, id: `enemy_${i}`, name: nameStr, hp: base.maxHp, conditions: [], dead: false, loadingStats: !found }
+      return {
+        ...base, id: `enemy_${i}`, name: nameStr,
+        hp: base.maxHp, conditions: [], dead: false,
+        loadingStats: !found,
+        statusEffects: [],
+        spellList: getEnemySpellList(base),
+        spellCooldown: 0, // turns until can cast again
+      }
     }), [enemyNames, character.level])
 
-  const [player,       setPlayer]      = useState(() => ({ ...statBlock(character), conditions: [], spellSlotsUsed: {} }))
-  const [enemies,      setEnemies]     = useState(initEnemies)
-  const [phase,        setPhase]       = useState(PHASES.PLAYER)
-  const [round,        setRound]       = useState(1)
-  const [log,          setLog]         = useState([])
-  const [actionUsed,   setActionUsed]  = useState(false)
-  const [bonusUsed,    setBonusUsed]   = useState(false)
-  const [selectedTarget, setTarget]    = useState(null)
-  const [activeTab,    setActiveTab]   = useState('actions')
-  const [summary,      setSummary]     = useState(null)
-  const [generating,   setGenerating]  = useState(false)
-  const [loot,         setLoot]         = useState(null)
-  // Dice roll request state
-  const [diceRequest,  setDiceRequest] = useState(null)
-  // { expr, label, sides, count, bonus, onResult(total, rolls) }
-  const [dicePool,     setDicePool]    = useState([])
-  const [diceResults,  setDiceResults] = useState(null)
-  const [diceModifier, setDiceModifier]= useState(0)
-  const [selectedSlot, setSlot]        = useState(null)
-  const [showInventory, setShowInventory] = useState(false)
-  const logRef   = useRef(null)
-  const playerRef = useRef(player)
-  useEffect(() => { playerRef.current = player }, [player])
+  const [player,       setPlayer]       = useState(() => ({ ...statBlock(character), conditions: [], spellSlotsUsed: {} }))
+  const [enemies,      setEnemies]      = useState(initEnemies)
+  const [phase,        setPhase]        = useState(PHASES.PLAYER)
+  const [round,        setRound]        = useState(1)
+  const [log,          setLog]          = useState([])
+  const [actionUsed,   setActionUsed]   = useState(false)
+  const [bonusUsed,    setBonusUsed]    = useState(false)
 
-  // Load real monster stats from database (overrides hardcoded stats if found)
+  // ── Targeting state ──────────────────────────────────────
+  const [targetMode,   setTargetMode]   = useState(TARGET_MODE.SINGLE_ENEMY)
+  const [selectedTargets, setSelectedTargets] = useState([]) // array of ids ('player' or enemy id)
+
+  // ── Spell state ──────────────────────────────────────────
+  const [activeTab,    setActiveTab]    = useState('actions')
+  const [selectedSlot, setSlot]         = useState(null)
+  const [spellFetching, setSpellFetching] = useState(null) // name of spell being fetched
+  // Dart/ray assignment for Magic Missile / Scorching Ray
+  const [dartAssign,   setDartAssign]   = useState(null)
+  // { spellName, totalDarts, assignments: [ enemyId | 'player' ], slotLevel }
+
+  const [summary,      setSummary]      = useState(null)
+  const [generating,   setGenerating]   = useState(false)
+  const [loot,         setLoot]         = useState(null)
+  const [diceRequest,  setDiceRequest]  = useState(null)
+  const [dicePool,     setDicePool]     = useState([])
+  const [diceResults,  setDiceResults]  = useState(null)
+
+  const logRef     = useRef(null)
+  const playerRef  = useRef(player)
+  const enemiesRef = useRef(enemies)
+  useEffect(() => { playerRef.current  = player  }, [player])
+  useEffect(() => { enemiesRef.current = enemies }, [enemies])
+
+  // Load real monster stats from DB
   useEffect(() => {
     async function loadMonsterStats() {
       const updated = await Promise.all(
@@ -65,25 +96,17 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
           try {
             const dbStats = await lookupMonsterStats(enemy.name)
             if (dbStats) {
-              console.log(`[RAG] Loaded stats for ${enemy.name} from DB:`, dbStats.ac, dbStats.hp)
               return {
                 ...enemy,
-                ac:      dbStats.ac,
-                hp:      dbStats.hp,
-                maxHp:   dbStats.maxHp,
-                cr:      dbStats.cr,
-                xp:      dbStats.xp,
-                str:     dbStats.str, dex: dbStats.dex, con: dbStats.con,
-                int:     dbStats.int, wis: dbStats.wis, cha: dbStats.cha,
-                speed:   dbStats.speed,
+                ac: dbStats.ac, hp: dbStats.hp, maxHp: dbStats.maxHp,
+                cr: dbStats.cr, xp: dbStats.xp,
+                str: dbStats.str, dex: dbStats.dex, con: dbStats.con,
+                int: dbStats.int, wis: dbStats.wis, cha: dbStats.cha,
                 attacks: dbStats.attacks?.length ? dbStats.attacks : enemy.attacks,
-                loadingStats: false,
-                fromDatabase: true,
+                loadingStats: false, fromDatabase: true,
               }
             }
-          } catch (err) {
-            console.warn(`[RAG] Could not load stats for ${enemy.name}:`, err.message)
-          }
+          } catch {}
           return { ...enemy, loadingStats: false }
         })
       )
@@ -92,18 +115,17 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
     loadMonsterStats()
   }, []) // eslint-disable-line
 
-  // Roll initiative on mount
+  // Roll initiative
   useEffect(() => {
     const dexMod = abilityMod(character.dexterity || 10)
     const pRoll  = roll(20) + dexMod
     const order  = [
       { id: 'player', name: character.name, isPlayer: true, initiative: pRoll },
       ...initEnemies().map(e => {
-        const m = abilityMod(e.dex || 10); const r = roll(20) + m
-        return { id: e.id, name: e.name, isPlayer: false, initiative: r }
+        const m = abilityMod(e.dex || 10)
+        return { id: e.id, name: e.name, isPlayer: false, initiative: roll(20) + m }
       }),
     ].sort((a, b) => b.initiative - a.initiative || (b.isPlayer ? 1 : -1))
-
     addLog('initiative', { entries: order.map(c => `${c.name}: ${c.initiative}`) })
     const first = order[0]
     if (!first.isPlayer) { setPhase(PHASES.ENEMY); setTimeout(runEnemyTurns, 700) }
@@ -114,7 +136,108 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
 
   function addLog(type, data) { setLog(prev => [...prev, buildLogEntry(type, data)]) }
 
-  // ── Player weapon stats ──────────────────────────────────
+  // ── Targeting helpers ─────────────────────────────────────
+  function toggleTarget(id) {
+    if (targetMode === TARGET_MODE.AOE) return
+    if (targetMode === TARGET_MODE.DART) {
+      // Handled separately
+      return
+    }
+    if (targetMode === TARGET_MODE.MULTI) {
+      setSelectedTargets(prev =>
+        prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]
+      )
+    } else {
+      setSelectedTargets(prev => prev[0] === id ? [] : [id])
+    }
+  }
+
+  function selectSelf() {
+    setTargetMode(TARGET_MODE.SELF)
+    setSelectedTargets(['player'])
+  }
+
+  function selectAoE() {
+    setTargetMode(TARGET_MODE.AOE)
+    const liveIds = enemies.filter(e => !e.dead).map(e => e.id)
+    setSelectedTargets(liveIds)
+  }
+
+  function resetTargeting() {
+    setTargetMode(TARGET_MODE.SINGLE_ENEMY)
+    setSelectedTargets([])
+  }
+
+  // ── Status effects helpers ────────────────────────────────
+  function addStatusToEnemy(enemyId, effectId, duration) {
+    setEnemies(prev => prev.map(e => {
+      if (e.id !== enemyId) return e
+      const existing = e.statusEffects.find(s => s.effectId === effectId)
+      if (existing) {
+        return { ...e, statusEffects: e.statusEffects.map(s => s.effectId === effectId ? { ...s, duration: Math.max(s.duration, duration) } : s) }
+      }
+      const eff = STATUS_EFFECTS[effectId]
+      return { ...e, statusEffects: [...e.statusEffects, { effectId, name: eff.name, duration, icon: eff.icon, color: eff.color }] }
+    }))
+  }
+
+  function addStatusToPlayer(effectId, duration) {
+    const eff = STATUS_EFFECTS[effectId]
+    if (!eff) return
+    setPlayer(prev => {
+      const existing = prev.statusEffects.find(s => s.effectId === effectId)
+      if (existing) {
+        return { ...prev, statusEffects: prev.statusEffects.map(s => s.effectId === effectId ? { ...s, duration: Math.max(s.duration, duration) } : s) }
+      }
+      return { ...prev, statusEffects: [...prev.statusEffects, { effectId, name: eff.name, duration, icon: eff.icon, color: eff.color }] }
+    })
+  }
+
+  function tickStatusEffects() {
+    // Tick enemy statuses
+    setEnemies(prev => prev.map(e => {
+      if (e.dead) return e
+      let newHp = e.hp
+      const logs = []
+      const newEffects = []
+      for (const se of e.statusEffects) {
+        const result = applyStatusTick(e, se.effectId)
+        if (result) {
+          newHp = Math.max(0, newHp - result.damage + result.heal)
+          logs.push(...result.logs)
+          if (!result.removeEffect && se.duration > 1) {
+            newEffects.push({ ...se, duration: se.duration - 1 })
+          }
+        } else {
+          if (se.duration > 1) newEffects.push({ ...se, duration: se.duration - 1 })
+        }
+      }
+      for (const l of logs) addLog(l.type, l)
+      if (newHp <= 0 && !e.dead) addLog('death', { name: e.name })
+      return { ...e, hp: Math.max(0, newHp), dead: newHp <= 0, statusEffects: newEffects }
+    }))
+
+    // Tick player statuses
+    setPlayer(prev => {
+      let newHp = prev.hp
+      const newEffects = []
+      for (const se of prev.statusEffects) {
+        const result = applyStatusTick(prev, se.effectId)
+        if (result) {
+          newHp = Math.max(0, Math.min(prev.maxHp, newHp - result.damage + result.heal))
+          for (const l of result.logs) addLog(l.type, l)
+          if (!result.removeEffect && se.duration > 1) {
+            newEffects.push({ ...se, duration: se.duration - 1 })
+          }
+        } else {
+          if (se.duration > 1) newEffects.push({ ...se, duration: se.duration - 1 })
+        }
+      }
+      return { ...prev, hp: newHp, statusEffects: newEffects }
+    })
+  }
+
+  // ── Player weapon stats ───────────────────────────────────
   function getWeaponName() {
     const equip = (character.equipment || []).join(' ').toLowerCase()
     const ws = ['greatsword','longsword','rapier','shortsword','handaxe','dagger','greataxe','quarterstaff','mace','warhammer','spear']
@@ -129,34 +252,33 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
     if (equip.includes('handaxe'))      return '1d6'
     if (equip.includes('dagger'))       return '1d4'
     if (equip.includes('greataxe'))     return '1d12'
-    if (equip.includes('quarterstaff')) return '1d6'
     return '1d6'
   }
   function getPlayerAttackBonus() {
-    const strM = abilityMod(player.str || 10)
-    const dexM = abilityMod(player.dex || 10)
-    return Math.max(strM, dexM) + (player.profBonus || 2)
+    return Math.max(abilityMod(player.str||10), abilityMod(player.dex||10)) + (player.profBonus || 2)
+  }
+  function getSpellcastingMod(stat) {
+    const m = { cha: character.charisma, int: character.intelligence, wis: character.wisdom }
+    return abilityMod(m[stat] || 10)
+  }
+  function getSpellDC(stat) {
+    return 8 + (character.proficiency_bonus || 2) + getSpellcastingMod(stat)
   }
 
-  // ── Dice request flow ────────────────────────────────────
-  // Instead of auto-rolling, we show the dice roller and wait for the player
+  // ── Dice request ──────────────────────────────────────────
   function requestDice(expr, label, onResult) {
-    // Parse expr like "1d20+4" or "2d8+3"
     const m     = expr.match(/(\d*)d(\d+)([+-]\d+)?/)
     const count = parseInt(m?.[1] || '1')
     const sides = parseInt(m?.[2] || '20')
     const bonus = parseInt(m?.[3] || '0')
     setDiceRequest({ expr, label, sides, count, bonus, onResult })
     setDicePool(Array.from({ length: count }, () => 0))
-    setDiceResults(null)
-    setDiceModifier(bonus)
     setPhase(PHASES.ROLL)
   }
 
   function rollOneDie(idx) {
     const sides = diceRequest?.sides || 20
-    const result = roll(sides)
-    setDicePool(prev => { const next = [...prev]; next[idx] = result; return next })
+    setDicePool(prev => { const next = [...prev]; next[idx] = roll(sides); return next })
   }
 
   function rollAllDice() {
@@ -171,122 +293,393 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
     const total    = dicePool.reduce((s, r) => s + r, 0) + (diceRequest.bonus || 0)
     const isCrit   = diceRequest.sides === 20 && dicePool[0] === 20
     const isFumble = diceRequest.sides === 20 && dicePool[0] === 1
-    // IMPORTANT: capture callback and clear state BEFORE calling it
-    // so that if onResult calls requestDice() again, the new request is not overwritten
     const callback = diceRequest.onResult
     setDiceRequest(null)
     setDicePool([])
-    // Now call — any new requestDice() inside will set fresh state
     callback(total, dicePool, isCrit, isFumble)
   }
 
-  // ── Player attack ────────────────────────────────────────
+  // ── Apply damage to enemy ────────────────────────────────
+  function applyDamageToEnemy(id, dmg) {
+    setEnemies(prev => prev.map(e => {
+      if (e.id !== id) return e
+      const newHp = Math.max(0, e.hp - dmg)
+      if (newHp <= 0 && !e.dead) addLog('death', { name: e.name })
+      return { ...e, hp: newHp, dead: newHp <= 0 }
+    }))
+  }
+
+  function applyHealToPlayer(amount) {
+    setPlayer(prev => ({ ...prev, hp: Math.min(prev.maxHp, prev.hp + amount) }))
+  }
+
+  // ── PLAYER ATTACK ─────────────────────────────────────────
   function handlePlayerAttack() {
-    if (!selectedTarget || actionUsed) return
-    const target = enemies.find(e => e.id === selectedTarget)
+    if (actionUsed || selectedTargets.length === 0) return
+    const targetId = selectedTargets[0]
+    const target   = enemies.find(e => e.id === targetId)
     if (!target || target.dead) return
+
     const atkBonus  = getPlayerAttackBonus()
     const dmgDice   = getPlayerDamageDice()
     const dmgBonus  = Math.max(abilityMod(player.str||10), abilityMod(player.dex||10))
 
-    requestDice(`1d20${atkBonus >= 0 ? '+' : ''}${atkBonus}`, `Attack roll vs ${target.name} (AC ${target.ac})`, (total, rolls, isCrit, isFumble) => {
+    // Check if player has advantage from target status
+    const hasAdvantage = target.statusEffects?.some(s =>
+      STATUS_EFFECTS[s.effectId]?.giveAdvantageToAttackers ||
+      STATUS_EFFECTS[s.effectId]?.giveAdvantageToMelee
+    )
+    // Check if player has disadvantage from own status
+    const hasDisadvantage = player.statusEffects?.some(s =>
+      STATUS_EFFECTS[s.effectId]?.attackDisadvantage
+    )
+
+    const label = hasAdvantage ? `Attack (Advantage) vs ${target.name} (AC ${target.ac})` :
+                  hasDisadvantage ? `Attack (Disadvantage) vs ${target.name}` :
+                  `Attack vs ${target.name} (AC ${target.ac})`
+
+    requestDice(`1d20${atkBonus >= 0 ? '+' : ''}${atkBonus}`, label, (total, rolls, isCrit, isFumble) => {
       const hits = isCrit || (!isFumble && total >= target.ac)
       if (hits) {
-        // Now roll damage
         const dmgExpr = isCrit ? `${dmgDice.replace('1d','2d')}+${dmgBonus}` : `${dmgDice}+${dmgBonus}`
-        requestDice(dmgExpr, `Damage${isCrit ? ' (CRITICAL — double dice!)' : ''}`, (dmgTotal, dmgRolls) => {
+        requestDice(dmgExpr, `Damage${isCrit ? ' (CRITICAL!)' : ''}`, (dmgTotal, dmgRolls) => {
           addLog('attack', { actor: player.name, target: target.name, weapon: getWeaponName(), roll: rolls[0], bonus: atkBonus, total, ac: target.ac, hits: true, isCrit, damage: dmgTotal, damageRolls: dmgRolls, damageType: 'slashing' })
           applyDamageToEnemy(target.id, dmgTotal)
-          setActionUsed(true); setTarget(null); setPhase(PHASES.PLAYER)
+          setActionUsed(true); resetTargeting(); setPhase(PHASES.PLAYER)
         })
       } else {
         addLog('attack', { actor: player.name, target: target.name, weapon: getWeaponName(), roll: rolls[0], bonus: atkBonus, total, ac: target.ac, hits: false, isFumble, damage: 0, damageType: 'slashing' })
-        setActionUsed(true); setTarget(null); setPhase(PHASES.PLAYER)
+        setActionUsed(true); resetTargeting(); setPhase(PHASES.PLAYER)
       }
     })
   }
 
-  // ── Player spell ─────────────────────────────────────────
-  const SPELL_DATA = {
-    'Fire Bolt':     { atkStat:'cha', dmg:'1d10', type:'fire' },
-    'Ray of Frost':  { atkStat:'int', dmg:'1d8',  type:'cold' },
-    'Shocking Grasp':{ atkStat:'int', dmg:'1d8',  type:'lightning' },
-    'Chill Touch':   { atkStat:'cha', dmg:'1d8',  type:'necrotic' },
-    'Poison Spray':  { save:'CON', dc: () => 8+(character.proficiency_bonus||2)+abilityMod(character.constitution||10), dmg:'1d12', type:'poison' },
-    'Sacred Flame':  { save:'DEX', dc: () => 8+(character.proficiency_bonus||2)+abilityMod(character.wisdom||10),      dmg:'1d8',  type:'radiant' },
-    'Vicious Mockery':{ save:'WIS', dc: () => 8+(character.proficiency_bonus||2)+abilityMod(character.charisma||10),   dmg:'1d4',  type:'psychic' },
-    'Toll the Dead': { save:'WIS', dc: () => 8+(character.proficiency_bonus||2)+abilityMod(character.wisdom||10),      dmg: t => t.hp < t.maxHp ? '1d12':'1d8', type:'necrotic' },
-    'Magic Missile': { auto:true,  dmg: sl => `${(sl||1)+2}d4+${(sl||1)+2}`, type:'force' },
-    'Burning Hands': { save:'DEX', dc: () => 8+(character.proficiency_bonus||2)+Math.max(abilityMod(character.intelligence||10),abilityMod(character.charisma||10)), dmg: sl=>`${(sl||1)*2+1}d6`, type:'fire' },
-    'Chromatic Orb': { atkStat:'int', dmg: sl=>`${sl||1}d8`, type:'varies' },
-    'Inflict Wounds':{ atkStat:'wis', dmg: sl=>`${(sl||1)*2+1}d10`, type:'necrotic' },
-    'Guiding Bolt':  { atkStat:'wis', dmg:'4d6', type:'radiant' },
-    'Witch Bolt':    { atkStat:'int', dmg: sl=>`${sl||1}d12`, type:'lightning' },
-  }
-
-  function spellCastingMod(stat) {
-    const m = { cha: character.charisma, int: character.intelligence, wis: character.wisdom }
-    return abilityMod((m[stat] || 10))
-  }
-
-  function handlePlayerSpell(spellName, slotLevel) {
-    if (!selectedTarget || actionUsed) return
-    const target   = enemies.find(e => e.id === selectedTarget)
-    if (!target || target.dead) return
-    // CRITICAL: slotLevel comes from state as a string ("1","2"...) — must parse to int
+  // ── PLAYER SPELL — fetches from Open5e live ─────────────────
+  async function handlePlayerSpell(spellName, slotLevel) {
     const slotLevelInt = slotLevel ? parseInt(slotLevel, 10) : null
-    const isCantrip = (character.spells||[]).find(s => s.toLowerCase().includes(spellName.toLowerCase()) && s.includes('cantrip'))
-    const data      = SPELL_DATA[spellName]
+    const cleanName    = spellName.replace(/\s*\(cantrip\)/i, '').trim()
 
-    if (!data) {
-      // Unknown spell - just log it
-      addLog('spell', { actor: player.name, spell: spellName, target: target.name, slotLevel, damage: 0, hits: false, note:'Resolve with DM after combat.' })
-      setActionUsed(true); setPhase(PHASES.PLAYER); return
-    }
-
-    const dmgExpr  = typeof data.dmg === 'function' ? data.dmg(slotLevelInt, target) : data.dmg
-    const spellType = data.type
-
-    function resolveDamage(hits, halfOnMiss) {
-      if (!hits && !halfOnMiss) {
-        addLog('spell', { actor: player.name, spell: spellName, target: target.name, slotLevel, damage: 0, hits: false, damageType: spellType })
-        setActionUsed(true); spendSlot(isCantrip ? null : slotLevelInt); setPhase(PHASES.PLAYER); return
+    // Fast path: check local PLAYER_SPELLS dict first — no network call
+    let spellData = null
+    const localDef = getSpellDef(cleanName)
+    if (localDef) {
+      spellData = {
+        name: cleanName, level: localDef.level || 0,
+        castAs:       localDef.castAs || 'action',
+        castingStat:  localDef.atkStat || 'int',
+        spellType:    localDef.type === 'heal' ? 'heal' : localDef.type === 'buff' ? 'buff' : localDef.type === 'attack' ? 'attack' : 'save',
+        rangeType:    localDef.range === 'aoe' ? 'aoe' : localDef.range === 'self' ? 'self' : 'single',
+        isSelfRange:  localDef.range === 'self',
+        isHeal:       localDef.type === 'heal',
+        isDart:       localDef.type === 'multi_attack',
+        isAttackRoll: localDef.type === 'attack',
+        damageDice:   typeof localDef.damage === 'function' ? localDef.damage(slotLevelInt) : (localDef.damage || null),
+        damageType:   localDef.dmgType || null,
+        damageAtSlot: {},
+        saveStat:     localDef.saveStat || null,
+        saveOnHalf:   !!localDef.halfOnSave,
+        healAtSlot:   localDef.healDice
+          ? { [String(localDef.level||1)]: typeof localDef.healDice === 'function' ? localDef.healDice(slotLevelInt) : localDef.healDice }
+          : {},
+        statusEffect: localDef.applyEffect
+          ? { effectId: localDef.applyEffect, duration: localDef.effectDuration || 2 }
+          : null,
+        targetType:   localDef.targetType || 'enemy',
+        description:  localDef.description || '',
+        dartCount:    localDef.rays ? () => localDef.rays : null,
+        icon:         localDef.icon || '✨',
       }
-      requestDice(dmgExpr, `${spellName} damage${halfOnMiss && !hits ? ' (half — save succeeded)' : ''}`, (total, rolls) => {
-        const finalDmg = halfOnMiss && !hits ? Math.floor(total / 2) : total
-        addLog('spell', { actor: player.name, spell: spellName, target: target.name, slotLevel, damage: finalDmg, damageRolls: rolls, hits, damageType: spellType })
-        applyDamageToEnemy(target.id, finalDmg)
-        setActionUsed(true); spendSlot(isCantrip ? null : slotLevel); setPhase(PHASES.PLAYER)
-      })
+    } else {
+      // Fall back to Open5e live fetch
+      setSpellFetching(cleanName)
+      spellData = await fetchSpell(cleanName)
+      setSpellFetching(null)
     }
 
-    if (data.auto) {
-      requestDice(dmgExpr, `${spellName} — automatic hit, roll damage`, (total, rolls) => {
-        addLog('spell', { actor: player.name, spell: spellName, target: target.name, slotLevel, damage: total, damageRolls: rolls, hits: true, damageType: spellType })
-        applyDamageToEnemy(target.id, total)
-        setActionUsed(true); spendSlot(slotLevel); setPhase(PHASES.PLAYER)
+    if (!spellData) {
+      // Unknown spell: log it and consume action so turn still proceeds
+      addLog('spell', {
+        actor: player.name, spell: cleanName, target: '?', slotLevel: slotLevelInt,
+        damage: 0, hits: false, note: 'Spell not found in Open5e — resolve with DM.',
       })
-    } else if (data.save) {
-      const dc = typeof data.dc === 'function' ? data.dc() : data.dc
-      const hasSave = !!data.save
-      addLog('spell_save_announce', { spell: spellName, dc, stat: data.save, target: target.name })
-      // Auto-resolve enemy save (enemy rolls)
-      const saveResult = resolveSave({ creature: target, stat: data.save, dc })
-      setTimeout(() => {
-        addLog('enemy_save', { name: target.name, stat: data.save, dc, roll: saveResult.dieRoll, mod: saveResult.mod, total: saveResult.total, success: saveResult.success })
-        resolveDamage(!saveResult.success, hasSave)
-      }, 500)
-    } else if (data.atkStat) {
-      const atkMod = spellCastingMod(data.atkStat) + (character.proficiency_bonus || 2)
-      requestDice(`1d20${atkMod >= 0 ? '+' : ''}${atkMod}`, `${spellName} attack vs ${target.name} (AC ${target.ac})`, (total, rolls, isCrit) => {
-        const hits = isCrit || total >= target.ac
-        if (hits) resolveDamage(true, false)
-        else {
-          addLog('spell', { actor: player.name, spell: spellName, target: target.name, slotLevel, damage: 0, hits: false, damageType: spellType })
-          setActionUsed(true); spendSlot(isCantrip ? null : slotLevelInt); setPhase(PHASES.PLAYER)
-        }
-      })
+      setActionUsed(true)
+      setPhase(PHASES.PLAYER)
+      return
     }
+
+    const isBonus    = spellData.castAs === 'bonus' || spellData.castAs === 'reaction'
+    const isSelf     = spellIsSelfCast(spellData)
+    const isAoE      = spellData.rangeType === 'aoe'
+    const isDart     = spellData.isDart
+    const isHeal     = spellData.isHeal
+    const needsEnemy = spellNeedsEnemyTarget(spellData)
+
+    // ── Route by spell type ──────────────────────────────────
+
+    // 1. Dart spells (Magic Missile, Scorching Ray)
+    if (isDart) {
+      const totalDarts = typeof spellData.dartCount === 'function'
+        ? spellData.dartCount(slotLevelInt)
+        : 3
+      const dmgPerDart = spellData.damageDice || '1d4+1'
+      setDartAssign({
+        spellName: cleanName, spellData,
+        damageDice: dmgPerDart, dmgType: spellData.damageType || 'force',
+        statusEffect: spellData.statusEffect,
+        totalDarts, assignments: [], slotLevelInt, isBonus,
+      })
+      return
+    }
+
+    // 2. Self / buff spells — always auto-target player, no selection needed
+    if (isSelf && !isHeal) {
+      resolveBuffSpell(spellData, cleanName, slotLevelInt, isBonus)
+      return
+    }
+
+    // 3. Healing spells — default to self if no enemy selected
+    if (isHeal) {
+      const tId = (selectedTargets[0] && selectedTargets[0] !== 'player')
+        ? selectedTargets[0] : 'player'
+      resolveHealSpell(spellData, cleanName, slotLevelInt, isBonus, tId)
+      return
+    }
+
+    // 4. AoE — hit all living enemies
+    if (isAoE) {
+      resolveAoESpell(spellData, cleanName, slotLevelInt, isBonus)
+      return
+    }
+
+    // 5. Single-target offensive — need an enemy selected
+    if (needsEnemy && (selectedTargets.length === 0 || selectedTargets[0] === 'player')) {
+      addLog('action', { actor: player.name, action: `⚠ Select an enemy target first for ${cleanName}` })
+      return
+    }
+
+    const target = enemies.find(e => e.id === selectedTargets[0])
+    if (!target || target.dead) return
+
+    // Route by attack type
+    if (spellData.spellType === 'save') {
+      resolveSaveSpell(spellData, cleanName, slotLevelInt, isBonus, target)
+    } else if (spellData.isAttackRoll || spellData.spellType === 'attack') {
+      resolveAttackSpell(spellData, cleanName, slotLevelInt, isBonus, target)
+    } else {
+      // Fallback: if has damage dice, treat as save spell; else buff
+      if (spellData.damageDice) {
+        resolveSaveSpell(spellData, cleanName, slotLevelInt, isBonus, target)
+      } else {
+        resolveBuffSpell(spellData, cleanName, slotLevelInt, isBonus)
+      }
+    }
+  }
+
+  // ── Buff / protective self-cast ───────────────────────────
+  function resolveBuffSpell(spellData, spellName, slotLevelInt, isBonus) {
+    const eff = spellData.statusEffect
+    if (eff) addStatusToPlayer(eff.effectId, eff.duration)
+
+    const effLabel = eff ? (STATUS_EFFECTS[eff.effectId]?.name || eff.effectId) : null
+    addLog('spell', {
+      actor: player.name, spell: spellName, target: player.name,
+      slotLevel: slotLevelInt, damage: 0, hits: true, damageType: 'buff',
+      note: effLabel
+        ? `${effLabel} applied for ${eff.duration} turns`
+        : spellData.description?.slice(0, 80),
+    })
+    finishSpell(isBonus, slotLevelInt)
+  }
+
+  // ── Heal spell ────────────────────────────────────────────
+  function resolveHealSpell(spellData, spellName, slotLevelInt, isBonus, targetId) {
+    const healExpr = getHealDiceForSlot(spellData, slotLevelInt)
+    const isPlayer = targetId === 'player'
+    requestDice(healExpr, `${spellName} — Healing${isPlayer ? ' (self)' : ''}`, (healTotal, rolls) => {
+      applyHealToPlayer(healTotal)
+      // Apply any status effect too (e.g. Armor of Agathys also gives buff)
+      if (spellData.statusEffect) addStatusToPlayer(spellData.statusEffect.effectId, spellData.statusEffect.duration)
+      addLog('heal', {
+        actor: player.name, spell: spellName,
+        target: isPlayer ? player.name : targetId,
+        slotLevel: slotLevelInt, heal: healTotal, rolls,
+      })
+      finishSpell(isBonus, slotLevelInt)
+    })
+  }
+
+  // ── AoE save spell ────────────────────────────────────────
+  function resolveAoESpell(spellData, spellName, slotLevelInt, isBonus) {
+    const liveEnemies = enemies.filter(e => !e.dead)
+    if (liveEnemies.length === 0) return
+    const dmgExpr = getDamageDiceForSlot(spellData, slotLevelInt, character)
+
+    requestDice(dmgExpr, `${spellName} — AoE vs ${liveEnemies.length} targets`, (total, rolls) => {
+      for (const enemy of liveEnemies) {
+        const dc = getSpellDC((spellData.saveStat || 'DEX').toLowerCase())
+        const saveResult = spellData.saveStat
+          ? resolveSave({ creature: enemy, stat: spellData.saveStat, dc })
+          : { success: false, dieRoll: 0, mod: 0, total: 0 }
+        const finalDmg = saveResult.success
+          ? (spellData.saveOnHalf ? Math.floor(total / 2) : 0)
+          : total
+        addLog('spell_aoe', {
+          actor: player.name, spell: spellName, target: enemy.name,
+          slotLevel: slotLevelInt, damage: finalDmg,
+          damageType: spellData.damageType,
+          saveRoll: saveResult.total, saveDC: dc, saveSuccess: saveResult.success,
+        })
+        if (finalDmg > 0) applyDamageToEnemy(enemy.id, finalDmg)
+        if (!saveResult.success && spellData.statusEffect) {
+          addStatusToEnemy(enemy.id, spellData.statusEffect.effectId, spellData.statusEffect.duration)
+        }
+      }
+      finishSpell(isBonus, slotLevelInt)
+    })
+  }
+
+  // ── Save-based spell ──────────────────────────────────────
+  function resolveSaveSpell(spellData, spellName, slotLevelInt, isBonus, target) {
+    const dc = getSpellDC((spellData.saveStat || 'DEX').toLowerCase())
+    const saveResult = resolveSave({ creature: target, stat: spellData.saveStat || 'DEX', dc })
+    addLog('enemy_save', {
+      name: target.name, stat: spellData.saveStat, dc,
+      roll: saveResult.dieRoll, mod: saveResult.mod, total: saveResult.total, success: saveResult.success,
+    })
+
+    const dmgExpr = getDamageDiceForSlot(spellData, slotLevelInt, character)
+
+    // Control-only spell (no damage)
+    if (!spellData.damageDice && !dmgExpr.match(/d\d/)) {
+      if (!saveResult.success && spellData.statusEffect) {
+        addStatusToEnemy(target.id, spellData.statusEffect.effectId, spellData.statusEffect.duration)
+        addLog('spell', {
+          actor: player.name, spell: spellName, target: target.name,
+          slotLevel: slotLevelInt, damage: 0, hits: true, damageType: 'control',
+          note: `${STATUS_EFFECTS[spellData.statusEffect.effectId]?.name} applied`,
+        })
+      } else {
+        addLog('spell', {
+          actor: player.name, spell: spellName, target: target.name,
+          slotLevel: slotLevelInt, damage: 0, hits: false, note: 'Save succeeded',
+        })
+      }
+      finishSpell(isBonus, slotLevelInt)
+      return
+    }
+
+    // Damage + optional effect
+    requestDice(dmgExpr, `${spellName} damage${saveResult.success ? ' (half — save succeeded)' : ''}`, (total, rolls) => {
+      const finalDmg = saveResult.success
+        ? (spellData.saveOnHalf ? Math.floor(total / 2) : 0)
+        : total
+      addLog('spell', {
+        actor: player.name, spell: spellName, target: target.name,
+        slotLevel: slotLevelInt, damage: finalDmg, damageRolls: rolls,
+        hits: finalDmg > 0, damageType: spellData.damageType,
+      })
+      if (finalDmg > 0) applyDamageToEnemy(target.id, finalDmg)
+      if (!saveResult.success && spellData.statusEffect) {
+        addStatusToEnemy(target.id, spellData.statusEffect.effectId, spellData.statusEffect.duration)
+      }
+      finishSpell(isBonus, slotLevelInt)
+    })
+  }
+
+  // ── Attack roll spell ─────────────────────────────────────
+  function resolveAttackSpell(spellData, spellName, slotLevelInt, isBonus, target) {
+    const castStat = spellData.castingStat || 'int'
+    const atkMod   = getSpellcastingMod(castStat) + (character.proficiency_bonus || 2)
+    requestDice(
+      `1d20${atkMod >= 0 ? '+' : ''}${atkMod}`,
+      `${spellData.icon || '✨'} ${spellName} attack vs ${target.name} (AC ${target.ac})`,
+      (total, rolls, isCrit) => {
+        const hits = isCrit || total >= target.ac
+        if (!hits) {
+          addLog('spell', {
+            actor: player.name, spell: spellName, target: target.name,
+            slotLevel: slotLevelInt, damage: 0, hits: false, damageType: spellData.damageType,
+          })
+          finishSpell(isBonus, slotLevelInt)
+          return
+        }
+        let dmgExpr = getDamageDiceForSlot(spellData, slotLevelInt, character)
+        // Double dice on crit
+        if (isCrit) dmgExpr = dmgExpr.replace(/(\d+)d/g, (_, n) => `${parseInt(n)*2}d`)
+        requestDice(dmgExpr, `${spellName} damage${isCrit ? ' (CRITICAL!)' : ''}`, (dmgTotal, dmgRolls) => {
+          addLog('spell', {
+            actor: player.name, spell: spellName, target: target.name,
+            slotLevel: slotLevelInt, damage: dmgTotal, damageRolls: dmgRolls,
+            hits: true, isCrit, damageType: spellData.damageType,
+          })
+          applyDamageToEnemy(target.id, dmgTotal)
+          if (spellData.statusEffect) {
+            addStatusToEnemy(target.id, spellData.statusEffect.effectId, spellData.statusEffect.duration)
+          }
+          // Vampiric spells: heal player for half damage
+          if (/vampiric|life drain|drain/i.test(spellName)) {
+            const heal = Math.floor(dmgTotal / 2)
+            applyHealToPlayer(heal)
+            addLog('heal', { actor: player.name, spell: spellName, target: player.name, heal, note: 'life drain' })
+          }
+          finishSpell(isBonus, slotLevelInt)
+        })
+      }
+    )
+  }
+
+  // ── Dart assignment (Magic Missile, Scorching Ray) ────────
+  function assignDart(targetId) {
+    if (!dartAssign) return
+    setDartAssign(prev => {
+      if (prev.assignments.length >= prev.totalDarts) return prev
+      return { ...prev, assignments: [...prev.assignments, targetId] }
+    })
+  }
+
+  function removeDart(idx) {
+    setDartAssign(prev => ({ ...prev, assignments: prev.assignments.filter((_, i) => i !== idx) }))
+  }
+
+  function confirmDartAssignment() {
+    if (!dartAssign || dartAssign.assignments.length !== dartAssign.totalDarts) return
+    const { spellName, damageDice, dmgType, statusEffect, assignments, slotLevelInt, isBonus, totalDarts } = dartAssign
+    setDartAssign(null)
+
+    const dmgPerDart = damageDice || '1d4+1'
+    const targetGroups = {}
+    for (const tId of assignments) targetGroups[tId] = (targetGroups[tId] || 0) + 1
+
+    const allRolls = Array.from({ length: totalDarts }, () => rollDice(dmgPerDart))
+    let dartIdx = 0
+    for (const [tId, count] of Object.entries(targetGroups)) {
+      let totalDmg = 0
+      const dartRolls = []
+      for (let i = 0; i < count; i++) {
+        totalDmg += allRolls[dartIdx].total
+        dartRolls.push(...allRolls[dartIdx].rolls)
+        dartIdx++
+      }
+      const target = enemies.find(e => e.id === tId)
+      addLog('spell', {
+        actor: player.name, spell: spellName, target: target?.name || tId,
+        slotLevel: slotLevelInt, damage: totalDmg, damageRolls: dartRolls,
+        hits: true, damageType: dmgType || 'force',
+        note: `${count} dart${count > 1 ? 's' : ''}`,
+      })
+      applyDamageToEnemy(tId, totalDmg)
+      if (statusEffect) addStatusToEnemy(tId, statusEffect.effectId, statusEffect.duration)
+    }
+    finishSpell(isBonus, slotLevelInt)
+    resetTargeting()
+  }
+
+  // ── Shared turn finisher ──────────────────────────────────
+  function finishSpell(isBonus, slotLevel) {
+    if (isBonus) setBonusUsed(true); else setActionUsed(true)
+    spendSlot(slotLevel)
+    resetTargeting()
+    setPhase(PHASES.PLAYER)
   }
 
   function spendSlot(level) {
@@ -294,29 +687,67 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
     setPlayer(prev => ({ ...prev, spellSlotsUsed: { ...prev.spellSlotsUsed, [level]: (prev.spellSlotsUsed[level]||0)+1 } }))
   }
 
-  function applyDamageToEnemy(id, dmg) {
-    setEnemies(prev => prev.map(e => {
-      if (e.id !== id) return e
-      const newHp = Math.max(0, e.hp - dmg)
-      if (newHp <= 0) addLog('death', { name: e.name })
-      return { ...e, hp: newHp, dead: newHp <= 0 }
-    }))
-  }
-
-  // ── Enemy turns ──────────────────────────────────────────
+  // ── ENEMY TURNS ───────────────────────────────────────────
   const runEnemyTurns = useCallback(async () => {
     const currentPlayer = playerRef.current
-    const liveEnemies   = enemies.filter(e => !e.dead)
+    const liveEnemies   = enemiesRef.current.filter(e => !e.dead)
     if (liveEnemies.length === 0) return
 
     let updatedPlayerHP = currentPlayer.hp
 
     for (const enemy of liveEnemies) {
       await new Promise(r => setTimeout(r, 900))
-      const attack       = enemy.attacks?.[0]
+
+      // Check if stunned/frozen
+      const isStunned = enemy.statusEffects?.some(s => STATUS_EFFECTS[s.effectId]?.skipTurn)
+      if (isStunned) {
+        addLog('action', { actor: enemy.name, action: `${enemy.name} is stunned and loses their turn!` })
+        continue
+      }
+
+      // Decide: attack or cast spell
+      const canCastSpell = enemy.spellList?.length > 0 && (enemy.spellCooldown || 0) <= 0
+      const shouldCastSpell = canCastSpell && (
+        Math.random() < 0.4 || // 40% base chance
+        (enemy.hp / enemy.maxHp < 0.5 && enemy.spellList.some(s => ENEMY_SPELLS[s]?.type === 'heal')) // heal if low HP
+      )
+
+      if (shouldCastSpell) {
+        // Pick spell: prioritize healing if low HP, else offensive
+        let chosenSpellKey = null
+        if (enemy.hp / enemy.maxHp < 0.4) {
+          chosenSpellKey = enemy.spellList.find(s => ENEMY_SPELLS[s]?.type === 'heal')
+        }
+        if (!chosenSpellKey) {
+          const offensive = enemy.spellList.filter(s => {
+            const sp = ENEMY_SPELLS[s]
+            return sp && sp.type !== 'heal' && sp.type !== 'buff'
+          })
+          chosenSpellKey = offensive[Math.floor(Math.random() * offensive.length)]
+        }
+        if (!chosenSpellKey) chosenSpellKey = enemy.spellList[Math.floor(Math.random() * enemy.spellList.length)]
+
+        const spell = ENEMY_SPELLS[chosenSpellKey]
+        if (spell) {
+          const hpAfterSpell = await resolveEnemySpell(enemy, spell, currentPlayer, updatedPlayerHP)
+          if (hpAfterSpell !== undefined) updatedPlayerHP = hpAfterSpell
+          setEnemies(prev => prev.map(e => e.id === enemy.id ? { ...e, spellCooldown: 2 } : e))
+          if (updatedPlayerHP <= 0) { setPhase(PHASES.DEFEAT); return }
+          continue
+        }
+      }
+
+      // Reduce spell cooldown
+      if ((enemy.spellCooldown || 0) > 0) {
+        setEnemies(prev => prev.map(e => e.id === enemy.id ? { ...e, spellCooldown: e.spellCooldown - 1 } : e))
+      }
+
+      // Regular attack
+      const attack = enemy.attacks?.[0]
       if (!attack) continue
-      const alliesNear   = liveEnemies.filter(e => e.id !== enemy.id).length > 0
-      const packTactics  = alliesNear && (enemy.name.toLowerCase().includes('wolf') || enemy.name.toLowerCase().includes('rat'))
+
+      const alliesNear  = liveEnemies.filter(e => e.id !== enemy.id).length > 0
+      const packTactics = alliesNear && (enemy.name.toLowerCase().includes('wolf') || enemy.name.toLowerCase().includes('rat'))
       const d1 = roll(20), d2 = roll(20)
       const dieRoll = packTactics ? Math.max(d1, d2) : d1
       const total   = dieRoll + attack.bonus
@@ -332,31 +763,103 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
           const extra = rollMultiple(damageRolls.length, parseInt(attack.damage.split('d')[1])||6)
           damage += extra.reduce((s,r) => s+r, 0); damageRolls = [...damageRolls, ...extra]
         }
+        // Check if enemy is weakened
+        const isWeakened = enemy.statusEffects?.some(s => STATUS_EFFECTS[s.effectId]?.halfDamage)
+        if (isWeakened) damage = Math.floor(damage / 2)
       }
 
       const flavor = enemy.flavor?.[Math.floor(Math.random()*enemy.flavor.length)] || 'attacks'
-      addLog('enemy_attack', { actor: enemy.name, target: currentPlayer.name, weapon: attack.name, flavor, roll: dieRoll, bonus: attack.bonus, total, ac: currentPlayer.ac, hits, isCrit, isFumble, damage, damageRolls, damageType: attack.type, packTactics, rolls: packTactics ? [d1,d2] : [d1] })
+      addLog('enemy_attack', { actor: enemy.name, target: currentPlayer.name, weapon: attack.name, flavor, roll: dieRoll, bonus: attack.bonus, total, ac: currentPlayer.ac, hits, isCrit, isFumble, damage, damageRolls, damageType: attack.type, packTactics })
 
       if (hits && damage > 0) {
         updatedPlayerHP = Math.max(0, updatedPlayerHP - damage)
         setPlayer(prev => ({ ...prev, hp: updatedPlayerHP }))
 
+        // Apply attack special effect
+        if (attack.special) {
+          const saveRes = resolveSave({ creature: currentPlayer, stat: attack.special.stat, dc: attack.special.dc })
+          addLog('enemy_save', { name: currentPlayer.name, stat: attack.special.stat, dc: attack.special.dc, roll: saveRes.dieRoll, mod: saveRes.mod, total: saveRes.total, success: saveRes.success })
+          if (!saveRes.success && attack.special.effectId) {
+            addStatusToPlayer(attack.special.effectId, attack.special.duration || 2)
+            addLog('status_applied', { target: currentPlayer.name, effect: attack.special.desc, effectId: attack.special.effectId })
+          }
+        }
+
         if (updatedPlayerHP <= 0) {
           addLog('death', { name: currentPlayer.name, isPlayer: true })
           await new Promise(r => setTimeout(r, 500))
-          setPhase(PHASES.DEFEAT)  // FIX 2: go to defeat screen not END
+          setPhase(PHASES.DEFEAT)
           return
         }
       }
     }
 
     await new Promise(r => setTimeout(r, 400))
+    // Tick statuses at end of round
+    tickStatusEffects()
     addLog('turn_marker', { round })
     setRound(r => r + 1)
     setPhase(PHASES.PLAYER)
     setActionUsed(false)
     setBonusUsed(false)
   }, [enemies, round]) // eslint-disable-line
+
+  async function resolveEnemySpell(enemy, spell, currentPlayer, updatedHP) {
+    addLog('enemy_spell_cast', { actor: enemy.name, spell: spell.name, icon: spell.icon })
+    await new Promise(r => setTimeout(r, 500))
+
+    if (spell.type === 'heal') {
+      const healResult = rollDice(spell.healDice || '1d4+2')
+      const newHp = Math.min(enemy.maxHp, enemy.hp + healResult.total)
+      setEnemies(prev => prev.map(e => e.id === enemy.id ? { ...e, hp: newHp } : e))
+      addLog('enemy_heal', { actor: enemy.name, spell: spell.name, heal: healResult.total, newHp })
+      return
+    }
+    if (spell.type === 'buff') {
+      setEnemies(prev => prev.map(e => {
+        if (e.id !== enemy.id) return e
+        const eff = STATUS_EFFECTS[spell.applyEffect]
+        return { ...e, statusEffects: [...(e.statusEffects || []), { effectId: spell.applyEffect, name: eff.name, duration: spell.effectDuration || 2, icon: eff.icon, color: eff.color }] }
+      }))
+      addLog('action', { actor: enemy.name, action: `${enemy.name} casts ${spell.name}! Gains ${spell.applyEffect}` })
+      return
+    }
+
+    // AoE vs player
+    if (spell.range === 'aoe' || spell.type === 'save') {
+      const dc = spell.dc || 13
+      const saveResult = resolveSave({ creature: currentPlayer, stat: spell.saveStat || 'CON', dc })
+      addLog('enemy_save', { name: currentPlayer.name, stat: spell.saveStat, dc, roll: saveResult.dieRoll, mod: saveResult.mod, total: saveResult.total, success: saveResult.success })
+
+      if (!saveResult.success) {
+        const dmg = rollDice(spell.damage || '1d6')
+        const newHP = Math.max(0, updatedHP - dmg.total)
+        setPlayer(prev => ({ ...prev, hp: newHP }))
+        addLog('enemy_spell_hit', { actor: enemy.name, spell: spell.name, target: currentPlayer.name, damage: dmg.total, dmgType: spell.dmgType, saveSuccess: false })
+        if (spell.applyEffect) addStatusToPlayer(spell.applyEffect, spell.effectDuration || 2)
+        if (newHP <= 0) { addLog('death', { name: currentPlayer.name, isPlayer: true }); setPhase(PHASES.DEFEAT) }
+        return newHP  // ← propagate to runEnemyTurns
+      } else {
+        addLog('enemy_spell_hit', { actor: enemy.name, spell: spell.name, target: currentPlayer.name, damage: 0, dmgType: spell.dmgType, saveSuccess: true })
+      }
+    } else if (spell.type === 'attack') {
+      const atkBonus = spell.attackBonus || 4
+      const d20 = roll(20)
+      const total = d20 + atkBonus
+      const hits = d20 === 20 || total >= currentPlayer.ac
+      if (hits) {
+        const dmg = rollDice(spell.damage || '1d6')
+        const newHP = Math.max(0, updatedHP - dmg.total)
+        setPlayer(prev => ({ ...prev, hp: newHP }))
+        addLog('enemy_spell_hit', { actor: enemy.name, spell: spell.name, target: currentPlayer.name, damage: dmg.total, dmgType: spell.dmgType, roll: d20, total, ac: currentPlayer.ac, hits: true })
+        if (spell.applyEffect) addStatusToPlayer(spell.applyEffect, spell.effectDuration || 2)
+        if (newHP <= 0) { addLog('death', { name: currentPlayer.name, isPlayer: true }); setPhase(PHASES.DEFEAT) }
+        return newHP  // ← propagate to runEnemyTurns
+      } else {
+        addLog('enemy_spell_hit', { actor: enemy.name, spell: spell.name, target: currentPlayer.name, damage: 0, dmgType: spell.dmgType, roll: d20, total, ac: currentPlayer.ac, hits: false })
+      }
+    }
+  }
 
   function endPlayerTurn() {
     const live = enemies.filter(e => !e.dead)
@@ -370,25 +873,18 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
     setPhase(PHASES.END)
     const dead = enemies.filter(e => e.dead)
     const xp   = dead.reduce((s,e) => s+(e.xp||50), 0)
-
-    // Roll loot for each slain enemy
     let totalGold = 0
     const lootItems = []
     for (const e of dead) {
       const drop = rollLoot(e.name, e.cr)
       totalGold += drop.gold
       if (drop.item) lootItems.push(drop.item)
-      if (drop.gold > 0 || drop.item) {
-        addLog('loot', { enemy: e.name, gold: drop.gold, item: drop.item })
-      }
     }
     setLoot({ totalGold, items: lootItems })
-
-    addLog('combat_end', { victory: true, xpGained: xp, gold: totalGold, items: lootItems })
+    addLog('combat_end', { victory: true, xpGained: xp, gold: totalGold })
     generateSummary(true, xp)
   }
 
-  // Win check
   useEffect(() => {
     const live = enemies.filter(e => !e.dead)
     if (live.length === 0 && [PHASES.PLAYER, PHASES.ENEMY].includes(phase) && log.length > 2) triggerVictory()
@@ -397,49 +893,50 @@ export default function CombatScreen({ character, enemyNames, onCombatEnd }) {
   async function generateSummary(victory, xpGained) {
     setGenerating(true)
     const logText = log.map(e => {
-      if (e.type === 'attack' || e.type === 'enemy_attack') return `${e.actor} ${e.hits ? `hit ${e.target} for ${e.damage} damage` : `missed ${e.target}`}`
+      if (e.type === 'attack' || e.type === 'enemy_attack') return `${e.actor} ${e.hits ? `hit ${e.target} for ${e.damage}` : `missed ${e.target}`}`
       if (e.type === 'spell') return `${e.actor} cast ${e.spell} on ${e.target}: ${e.damage > 0 ? `${e.damage} damage` : 'no damage'}`
+      if (e.type === 'heal') return `${e.actor} healed for ${e.heal} HP`
       if (e.type === 'death') return `${e.name} ${e.isPlayer ? 'fell' : 'slain'}`
       return ''
     }).filter(Boolean).join('\n')
     try {
-      const prompt = `Write a vivid 2-paragraph D&D battle narrative. Third person, past tense, dramatic.
+      const prompt = `Write a vivid 2-paragraph D&D battle narrative. Third person, past tense.
 Hero: ${character.name}, Level ${character.level} ${character.race} ${character.class}
 Enemies: ${enemies.map(e => e.name).join(', ')}
 Result: ${victory ? 'Hero victorious' : 'Hero defeated'}
 Events:\n${logText}\nWrite only the narrative.`
       const text = await callAI([{ role:'user', content: prompt }], 400)
       setSummary({ narrative: text.trim(), xpGained: xpGained||0, victory })
-    } catch { setSummary({ narrative: victory ? 'You emerged victorious from the battle.' : 'You were overwhelmed and fell unconscious.', xpGained: xpGained||0, victory }) }
+    } catch {
+      setSummary({ narrative: victory ? 'Victory!' : 'Defeated.', xpGained: xpGained||0, victory })
+    }
     setGenerating(false)
   }
 
-  // ── Spell slots ──────────────────────────────────────────
-  const spellSlots    = character.spell_slots || {}
+  // ── Spell slots ───────────────────────────────────────────
+  const spellSlots     = character.spell_slots || {}
   const availableSlots = Object.entries(spellSlots)
     .filter(([lvl, d]) => (d.max - d.used - (player.spellSlotsUsed[lvl]||0)) > 0)
     .reduce((acc, [lvl, d]) => { acc[lvl] = d.max - d.used - (player.spellSlotsUsed[lvl]||0); return acc }, {})
-  const knownSpells   = (character.spells||[]).map(s => s.replace(/\s*\(cantrip\)/i,'').trim())
-  const isPlayerTurn  = phase === PHASES.PLAYER
-  const liveEnemies   = enemies.filter(e => !e.dead)
+  const knownSpells    = (character.spells||[]).map(s => s.replace(/\s*\(cantrip\)/i,'').trim())
+  const isPlayerTurn   = phase === PHASES.PLAYER
+  const liveEnemies    = enemies.filter(e => !e.dead)
 
-  // ── Log renderer ─────────────────────────────────────────
+  // ── LOG RENDERER ──────────────────────────────────────────
   function renderLog(entry) {
     switch (entry.type) {
-      case 'initiative': return <div className="log-initiative">⚔️ {entry.entries.join(' | ')}</div>
+      case 'initiative': return <div className="log-initiative">⚔️ Initiative: {entry.entries.join(' · ')}</div>
       case 'attack': case 'enemy_attack': return (
-        <div className={`log-entry ${entry.type === 'enemy_attack' ? 'log-enemy' : 'log-player'}`}>
+        <div className={`log-entry ${entry.type==='enemy_attack'?'log-enemy':'log-player'}`}>
           <span className="log-actor">{entry.actor}</span>
-          <span className="log-verb">{entry.flavor || `attacks ${entry.target}`}</span>
+          <span className="log-verb">{entry.flavor||`attacks ${entry.target}`}</span>
           {entry.packTactics && <span className="log-tag">Pack Tactics</span>}
-          {entry.isCrit    && <span className="log-tag crit">CRIT!</span>}
-          {entry.isFumble  && <span className="log-tag fumble">FUMBLE</span>}
+          {entry.isCrit && <span className="log-tag crit">CRIT!</span>}
+          {entry.isFumble && <span className="log-tag fumble">FUMBLE</span>}
           <span className="log-roll-line">
             <span className={`log-die ${entry.isCrit?'crit':entry.isFumble?'fumble':''}`}>{entry.roll}</span>
-            <span className="log-math">+{entry.bonus} = {entry.total} vs AC {entry.ac}</span>
-            <span className={`log-result ${entry.hits?'hit':'miss'}`}>
-              {entry.hits ? `HIT — ${entry.damage} ${entry.damageType}` : 'MISS'}
-            </span>
+            <span className="log-math">+{entry.bonus}={entry.total} vs AC {entry.ac}</span>
+            <span className={`log-result ${entry.hits?'hit':'miss'}`}>{entry.hits?`HIT — ${entry.damage} ${entry.damageType}`:'MISS'}</span>
           </span>
         </div>
       )
@@ -448,77 +945,112 @@ Events:\n${logText}\nWrite only the narrative.`
           <span className="log-actor">{entry.actor}</span>
           <span className="log-verb">casts {entry.spell}</span>
           {entry.slotLevel && <span className="log-tag">Lv{entry.slotLevel}</span>}
+          {entry.note && <span className="log-tag">{entry.note}</span>}
           <span className="log-target">→ {entry.target}</span>
           <span className={`log-result ${entry.hits?'hit':'miss'}`}>
-            {entry.damage > 0 ? `${entry.damage} ${entry.damageType}` : 'NO EFFECT'}
+            {entry.damage > 0 ? `${entry.damage} ${entry.damageType}` : entry.note || 'NO DAMAGE'}
           </span>
         </div>
       )
-      case 'spell_save_announce': return <div className="log-save">⚠ {entry.spell} — {entry.target} makes DC {entry.dc} {entry.stat} save</div>
-      case 'enemy_save': return <div className="log-save">{entry.name} {entry.stat} save: {entry.total} (d20={entry.roll}{entry.mod>=0?'+':''}{entry.mod}) vs DC {entry.dc} — {entry.success ? '✓ PASS':'✗ FAIL'}</div>
-      case 'death': return <div className={`log-entry ${entry.isPlayer?'log-death-player':'log-death'}`}>☠️ <strong>{entry.name}</strong> {entry.isPlayer?'falls unconscious!':'slain!'}</div>
-      case 'turn_marker': return <div className="log-divider">── End of Round {entry.round} ──</div>
-      case 'combat_end': return (
-        <div className="log-entry log-end">
-          {entry.victory ? `⚔️ Victory! +${entry.xpGained} XP` : '💀 Defeated'}
-          {entry.gold > 0 && ` · +${entry.gold} gp`}
-        </div>
-      )
-      case 'loot': return (
-        <div className="log-entry log-player" style={{fontSize:'.7rem'}}>
-          <span className="log-actor">Loot</span>
-          <span className="log-verb">{entry.enemy} dropped:</span>
-          {entry.gold > 0 && <span className="log-result hit">+{entry.gold} gp</span>}
-          {entry.item && <span className="log-result hit">📦 {entry.item}</span>}
-        </div>
-      )
-      case 'action': case 'bonus_action': return <div className="log-entry log-player"><span className="log-actor">{entry.actor}</span><span className="log-verb">{entry.action}</span></div>
-      case 'item_use': return (
-        <div className="log-entry log-player">
+      case 'spell_aoe': return (
+        <div className="log-entry log-player log-spell">
           <span className="log-actor">{entry.actor}</span>
-          <span className="log-verb">uses {entry.item}</span>
-          <span className="log-result hit">{entry.result}</span>
+          <span className="log-verb">AoE → {entry.target}</span>
+          {entry.saveRoll && <span className="log-math">DC {entry.saveDC} save: {entry.saveRoll} {entry.saveSuccess?'✓ saved':'✗ failed'}</span>}
+          <span className={`log-result ${entry.damage>0?'hit':'miss'}`}>{entry.damage > 0 ? `${entry.damage} ${entry.damageType}` : 'SAVED'}</span>
         </div>
       )
+      case 'heal': return (
+        <div className="log-entry log-heal">
+          <span className="log-actor">{entry.actor}</span>
+          <span className="log-verb">✨ heals {entry.target}</span>
+          {entry.note && <span className="log-tag">{entry.note}</span>}
+          <span className="log-result heal">+{entry.heal} HP</span>
+        </div>
+      )
+      case 'enemy_spell_cast': return (
+        <div className="log-entry log-enemy">
+          <span className="log-actor">{entry.actor}</span>
+          <span className="log-verb">{entry.icon} casts {entry.spell}!</span>
+        </div>
+      )
+      case 'enemy_spell_hit': return (
+        <div className="log-entry log-enemy log-spell">
+          <span className="log-actor">{entry.actor}</span>
+          <span className="log-verb">→ {entry.target}</span>
+          {entry.roll && <span className="log-math">Roll {entry.roll}={entry.total} vs AC {entry.ac}</span>}
+          <span className={`log-result ${entry.hits||entry.damage>0?'hit':'miss'}`}>
+            {entry.damage>0?`${entry.damage} ${entry.dmgType}`:'MISS / SAVED'}
+          </span>
+        </div>
+      )
+      case 'enemy_heal': return (
+        <div className="log-entry log-enemy">
+          <span className="log-actor">{entry.actor}</span>
+          <span className="log-verb">💚 heals itself for {entry.heal} HP ({entry.newHp} HP)</span>
+        </div>
+      )
+      case 'status_tick': return (
+        <div className="log-entry log-status">
+          <span className="log-actor">{entry.creature}</span>
+          <span className="log-verb">{entry.icon} {entry.effect} — {entry.damage} {entry.dmgType} damage</span>
+        </div>
+      )
+      case 'status_heal': return (
+        <div className="log-entry log-heal">
+          <span className="log-actor">{entry.creature}</span>
+          <span className="log-verb">{entry.icon} {entry.effect} — +{entry.heal} HP</span>
+        </div>
+      )
+      case 'status_save': return (
+        <div className="log-save">{entry.creature} {entry.stat} save: {entry.roll} vs DC {entry.dc} — {entry.success?'✓ effect ends':'✗ effect continues'}</div>
+      )
+      case 'status_applied': return (
+        <div className="log-save">⚠ {entry.target} is now {entry.effect}</div>
+      )
+      case 'enemy_save': return (
+        <div className="log-save">{entry.name} {entry.stat} save: {entry.total} (d20={entry.roll}{entry.mod>=0?'+':''}{entry.mod}) vs DC {entry.dc} — {entry.success?'✓ PASS':'✗ FAIL'}</div>
+      )
+      case 'death': return (
+        <div className={`log-entry ${entry.isPlayer?'log-death-player':'log-death'}`}>
+          ☠️ <strong>{entry.name}</strong> {entry.isPlayer?'falls unconscious!':'slain!'}
+        </div>
+      )
+      case 'turn_marker': return <div className="log-divider">── Round {entry.round} End ──</div>
+      case 'combat_end': return <div className="log-entry log-end">{entry.victory?`⚔️ Victory! +${entry.xpGained} XP`:''}{entry.gold>0?` · +${entry.gold} gp`:''}</div>
+      case 'action': return <div className="log-entry log-player"><span className="log-actor">{entry.actor}</span><span className="log-verb">{entry.action}</span></div>
       default: return null
     }
   }
 
-  // ── DEFEAT SCREEN (FIX 2) ────────────────────────────────
+  // ── SCREENS ───────────────────────────────────────────────
+
+  // Defeat
   if (phase === PHASES.DEFEAT) {
     return (
       <div className="cs-defeat-screen">
         <div className="cs-defeat-inner">
           <div className="cs-defeat-icon">💀</div>
           <h2 className="cs-defeat-title">You have fallen…</h2>
-          <p className="cs-defeat-sub">{character.name} lies unconscious on the battlefield.</p>
+          <p className="cs-defeat-sub">{character.name} lies unconscious.</p>
           <div className="cs-defeat-choices">
             <button className="cs-defeat-btn cs-replay-btn" onClick={() => {
               setPlayer({ ...statBlock(character), conditions: [], spellSlotsUsed: {} })
               setEnemies(initEnemies())
-              setPhase(PHASES.PLAYER)
-              setRound(1)
-              setLog([])
-              setActionUsed(false)
-              setBonusUsed(false)
-              setTarget(null)
+              setPhase(PHASES.PLAYER); setRound(1); setLog([])
+              setActionUsed(false); setBonusUsed(false); resetTargeting()
               setDiceRequest(null)
-            }}>
-              🔄 Replay Fight
-            </button>
-            <button className="cs-defeat-btn cs-bear-btn" onClick={() => {
-              const narrative = `${character.name} was overwhelmed and fell unconscious. The enemies stood over the fallen ${character.class}.`
-              onCombatEnd({ victory: false, narrative, playerHP: 1, xpGained: 0 })
-            }}>
-              ⚔️ Bear the Consequences
-            </button>
+            }}>🔄 Replay Fight</button>
+            <button className="cs-defeat-btn cs-bear-btn" onClick={() =>
+              onCombatEnd({ victory: false, narrative: `${character.name} was overwhelmed.`, playerHP: 1, xpGained: 0 })
+            }>⚔️ Bear the Consequences</button>
           </div>
         </div>
       </div>
     )
   }
 
-  // ── VICTORY / SUMMARY ────────────────────────────────────
+  // Victory
   if (phase === PHASES.END && summary) {
     return (
       <div className="cs-summary">
@@ -528,8 +1060,8 @@ Events:\n${logText}\nWrite only the narrative.`
           {summary.xpGained > 0 && <div className="cs-summary-xp">+{summary.xpGained} XP earned</div>}
           {loot && (loot.totalGold > 0 || loot.items.length > 0) && (
             <div className="cs-summary-loot">
-              <div className="cs-loot-title">⚙ Loot Found</div>
-              {loot.totalGold > 0 && <div className="cs-loot-row">⚙ {loot.totalGold} gold pieces</div>}
+              <div className="cs-loot-title">⚙ Loot</div>
+              {loot.totalGold > 0 && <div className="cs-loot-row">⚙ {loot.totalGold} gp</div>}
               {loot.items.map((item, i) => <div key={i} className="cs-loot-row">📦 {item}</div>)}
             </div>
           )}
@@ -543,58 +1075,119 @@ Events:\n${logText}\nWrite only the narrative.`
     )
   }
 
-  // ── DICE ROLL PANEL (FIX 1) ──────────────────────────────
+  // Dice Roll Panel
   if (phase === PHASES.ROLL && diceRequest) {
     const allRolled = dicePool.every(r => r > 0)
     const total     = allRolled ? dicePool.reduce((s,r) => s+r, 0) + (diceRequest.bonus||0) : null
     const isCrit    = allRolled && diceRequest.sides === 20 && dicePool[0] === 20
     const isFumble  = allRolled && diceRequest.sides === 20 && dicePool[0] === 1
-
     return (
       <div className="cs-dice-screen">
         <div className="cs-dice-panel">
           <div className="cs-dice-title">{diceRequest.label}</div>
           <div className="cs-dice-expr">{diceRequest.expr}</div>
-
           <div className="cs-dice-pool">
             {dicePool.map((val, i) => (
-              <button key={i} className={`cs-die-btn ${val > 0 ? 'rolled' : ''} ${val === diceRequest.sides && diceRequest.sides === 20 ? 'max' : ''} ${val === 1 && diceRequest.sides === 20 ? 'min' : ''}`}
-                onClick={() => rollOneDie(i)} disabled={val > 0}>
+              <button key={i} className={`cs-die-btn ${val>0?'rolled':''} ${val===diceRequest.sides&&diceRequest.sides===20?'max':''} ${val===1&&diceRequest.sides===20?'min':''}`}
+                onClick={() => rollOneDie(i)} disabled={val>0}>
                 {val > 0 ? val : <span className="cs-die-icon">d{diceRequest.sides}</span>}
               </button>
             ))}
           </div>
-
-          {diceRequest.bonus !== 0 && (
+          {diceRequest.bonus !== 0 && allRolled && (
             <div className="cs-dice-bonus">
-              {allRolled && <span className="cs-dice-sum">{dicePool.reduce((s,r)=>s+r,0)}</span>}
-              <span className="cs-dice-mod-label">{diceRequest.bonus >= 0 ? `+${diceRequest.bonus}` : diceRequest.bonus}</span>
-              {allRolled && <span className="cs-dice-equals">= <strong>{total}</strong></span>}
+              <span className="cs-dice-sum">{dicePool.reduce((s,r)=>s+r,0)}</span>
+              <span className="cs-dice-mod-label">{diceRequest.bonus>=0?`+${diceRequest.bonus}`:diceRequest.bonus}</span>
+              <span className="cs-dice-equals">= <strong>{total}</strong></span>
             </div>
           )}
-
           {allRolled && (
             <div className="cs-dice-result">
-              {isCrit   && <div className="cs-dice-crit">⭐ CRITICAL HIT!</div>}
+              {isCrit && <div className="cs-dice-crit">⭐ CRITICAL HIT!</div>}
               {isFumble && <div className="cs-dice-fumble">💀 Critical Fumble!</div>}
               <div className="cs-dice-total">{total}</div>
             </div>
           )}
-
           <div className="cs-dice-actions">
-            <button className="cs-roll-all-btn" onClick={rollAllDice} disabled={allRolled}>
-              🎲 Roll All
-            </button>
-            <button className="cs-confirm-btn" onClick={confirmDiceRoll} disabled={!allRolled}>
-              ✓ Confirm
-            </button>
+            <button className="cs-roll-all-btn" onClick={rollAllDice} disabled={allRolled}>🎲 Roll All</button>
+            <button className="cs-confirm-btn" onClick={confirmDiceRoll} disabled={!allRolled}>✓ Confirm</button>
           </div>
         </div>
       </div>
     )
   }
 
-  // ── MAIN COMBAT UI ───────────────────────────────────────
+  // ── DART ASSIGNMENT SCREEN ────────────────────────────────
+  if (dartAssign) {
+    const assigned = dartAssign.assignments.length
+    const remaining = dartAssign.totalDarts - assigned
+    return (
+      <div className="cs-root">
+        <div className="cs-dart-screen">
+          <div className="cs-dart-panel">
+            <div className="cs-dart-title">
+              {dartAssign.spellName}
+              {dartAssign.spellDef?.icon && ` ${dartAssign.spellDef.icon}`}
+            </div>
+            <div className="cs-dart-subtitle">
+              Assign {dartAssign.totalDarts} dart{dartAssign.totalDarts>1?'s':''} to targets
+            </div>
+            <div className="cs-dart-progress">
+              {Array.from({length: dartAssign.totalDarts}).map((_, i) => (
+                <div key={i} className={`cs-dart-pip ${i < assigned ? 'assigned' : 'empty'}`}>
+                  {i < assigned ? '✦' : '○'}
+                </div>
+              ))}
+            </div>
+            <div className="cs-dart-remaining">{remaining} dart{remaining!==1?'s':''} remaining</div>
+
+            <div className="cs-dart-targets">
+              {enemies.filter(e => !e.dead).map(enemy => (
+                <button key={enemy.id} className="cs-dart-target-btn"
+                  onClick={() => remaining > 0 && assignDart(enemy.id)}
+                  disabled={remaining === 0}>
+                  <div className="cs-dart-target-name">{enemy.name}</div>
+                  <div className="cs-dart-target-hp">{enemy.hp}/{enemy.maxHp} HP</div>
+                  <div className="cs-dart-target-count">
+                    {dartAssign.assignments.filter(t => t === enemy.id).length > 0 &&
+                      <span className="cs-dart-count-badge">
+                        {dartAssign.assignments.filter(t => t === enemy.id).length}✦
+                      </span>
+                    }
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {assigned > 0 && (
+              <div className="cs-dart-assignment-list">
+                <div className="cs-dart-list-title">Assigned:</div>
+                {dartAssign.assignments.map((tId, i) => {
+                  const t = enemies.find(e => e.id === tId)
+                  return (
+                    <div key={i} className="cs-dart-assignment-row">
+                      <span>Dart {i+1} → {t?.name}</span>
+                      <button className="cs-dart-remove" onClick={() => removeDart(i)}>✕</button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            <div className="cs-dart-actions">
+              <button className="cs-cancel-btn" onClick={() => setDartAssign(null)}>Cancel</button>
+              <button className="cs-confirm-btn" onClick={confirmDartAssignment}
+                disabled={assigned !== dartAssign.totalDarts}>
+                🎯 Fire! ({dartAssign.totalDarts} darts)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── MAIN COMBAT UI ────────────────────────────────────────
   return (
     <div className="cs-root">
       {/* Left: Log */}
@@ -615,83 +1208,145 @@ Events:\n${logText}\nWrite only the narrative.`
           {isPlayerTurn ? '⚔ YOUR TURN' : '⏳ ENEMY TURN'}
         </div>
 
+        {/* Enemies */}
         <div className="cs-enemies">
-          {enemies.map(enemy => (
-            <button key={enemy.id}
-              className={`cs-creature cs-enemy-card ${selectedTarget===enemy.id?'selected':''} ${enemy.dead?'dead':''} ${!isPlayerTurn?'disabled':''}`}
-              onClick={() => isPlayerTurn && !enemy.dead && setTarget(p => p===enemy.id ? null : enemy.id)}
-              disabled={!isPlayerTurn || enemy.dead}>
-              <div className="cs-creature-name">{enemy.dead?'☠️ ':selectedTarget===enemy.id?'🎯 ':''}{enemy.name}</div>
-              <div className="cs-hp-bar-wrap"><div className="cs-hp-bar" style={{ width:`${Math.max(0,Math.round((enemy.hp/enemy.maxHp)*100))}%`, background: enemy.hp/enemy.maxHp>.5?'#4ecb71':enemy.hp/enemy.maxHp>.25?'#e8b84a':'#e05050' }}/></div>
-              <div className="cs-creature-stats">
-                <span className="cs-stat-pill hp">{enemy.dead?0:enemy.hp}/{enemy.maxHp} HP</span>
-                <span className="cs-stat-pill ac">AC {enemy.ac}</span>
-                <span className="cs-stat-pill cr">CR {enemy.cr}</span>
-              </div>
-              {!enemy.dead && (<>
-                <div className="cs-creature-statblock">
-                  {['str','dex','con','int','wis','cha'].map(s=>(
-                    <div key={s} className="cs-mini-stat"><span>{s.toUpperCase()}</span><span>{enemy[s]||10}</span><span>{modStr(enemy[s]||10)}</span></div>
-                  ))}
+          {enemies.map(enemy => {
+            const isSelected = selectedTargets.includes(enemy.id)
+            return (
+              <button key={enemy.id}
+                className={`cs-creature cs-enemy-card ${isSelected?'selected':''} ${enemy.dead?'dead':''} ${!isPlayerTurn?'disabled':''}`}
+                onClick={() => isPlayerTurn && !enemy.dead && toggleTarget(enemy.id)}
+                disabled={!isPlayerTurn || enemy.dead}>
+                <div className="cs-creature-name">{enemy.dead?'☠️ ':isSelected?'🎯 ':''}{enemy.name}</div>
+                <div className="cs-hp-bar-wrap">
+                  <div className="cs-hp-bar" style={{ width:`${Math.max(0,Math.round((enemy.hp/enemy.maxHp)*100))}%`, background: enemy.hp/enemy.maxHp>.5?'#4ecb71':enemy.hp/enemy.maxHp>.25?'#e8b84a':'#e05050' }}/>
                 </div>
-                <div className="cs-creature-attacks">
-                  {enemy.attacks?.map((a,i)=><div key={i} className="cs-atk-pill">{a.name}: +{a.bonus} / {a.damage} {a.type}</div>)}
+                <div className="cs-creature-stats">
+                  <span className="cs-stat-pill hp">{enemy.dead?0:enemy.hp}/{enemy.maxHp} HP</span>
+                  <span className="cs-stat-pill ac">AC {enemy.ac}</span>
+                  <span className="cs-stat-pill cr">CR {enemy.cr}</span>
                 </div>
-              </>)}
-            </button>
-          ))}
+                {/* Status effects */}
+                {!enemy.dead && enemy.statusEffects?.length > 0 && (
+                  <div className="cs-status-effects">
+                    {enemy.statusEffects.map((se, i) => (
+                      <span key={i} className="cs-status-badge" style={{ borderColor: se.color, color: se.color }} title={`${se.name} (${se.duration} turns)`}>
+                        {se.icon} {se.name} <span className="cs-status-dur">{se.duration}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {/* Enemy spell list hint */}
+                {!enemy.dead && enemy.spellList?.length > 0 && (
+                  <div className="cs-enemy-spells">
+                    {enemy.spellList.map(s => ENEMY_SPELLS[s]).filter(Boolean).slice(0,2).map((sp,i) => (
+                      <span key={i} className="cs-enemy-spell-tag">{sp.icon} {sp.name}</span>
+                    ))}
+                  </div>
+                )}
+                {!enemy.dead && (
+                  <div className="cs-creature-attacks">
+                    {enemy.attacks?.map((a,i)=><div key={i} className="cs-atk-pill">{a.name}: +{a.bonus} / {a.damage}</div>)}
+                  </div>
+                )}
+              </button>
+            )
+          })}
         </div>
 
         <div className="cs-vs">VS</div>
 
+        {/* Player */}
         <div className="cs-player-card">
           <div className="cs-creature-name">{player.name}</div>
-          <div className="cs-hp-bar-wrap"><div className="cs-hp-bar" style={{ width:`${Math.max(0,Math.round((player.hp/player.maxHp)*100))}%`, background: player.hp/player.maxHp>.5?'#4ecb71':player.hp/player.maxHp>.25?'#e8b84a':'#e05050' }}/></div>
+          <div className="cs-hp-bar-wrap">
+            <div className="cs-hp-bar" style={{ width:`${Math.max(0,Math.round((player.hp/player.maxHp)*100))}%`, background: player.hp/player.maxHp>.5?'#4ecb71':player.hp/player.maxHp>.25?'#e8b84a':'#e05050' }}/>
+          </div>
           <div className="cs-creature-stats">
             <span className="cs-stat-pill hp">{player.hp}/{player.maxHp} HP</span>
             <span className="cs-stat-pill ac">AC {player.ac}</span>
             <span className="cs-stat-pill">Lv {character.level}</span>
           </div>
-          <div className="cs-creature-statblock">
-            {[['STR',player.str],['DEX',player.dex],['CON',player.con],['INT',player.int],['WIS',player.wis],['CHA',player.cha]].map(([n,v])=>(
-              <div key={n} className="cs-mini-stat"><span>{n}</span><span>{v}</span><span>{modStr(v)}</span></div>
-            ))}
-          </div>
+          {/* Player status effects */}
+          {player.statusEffects?.length > 0 && (
+            <div className="cs-status-effects">
+              {player.statusEffects.map((se, i) => (
+                <span key={i} className="cs-status-badge" style={{ borderColor: se.color, color: se.color }}>
+                  {se.icon} {se.name} <span className="cs-status-dur">{se.duration}</span>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="cs-economy">
-            <div className={`cs-pip action ${actionUsed?'used':''}`} title="Action">A</div>
-            <div className={`cs-pip bonus ${bonusUsed?'used':''}`} title="Bonus">B</div>
+            <div className={`cs-pip action ${actionUsed?'used':''}`}>A</div>
+            <div className={`cs-pip bonus ${bonusUsed?'used':''}`}>B</div>
           </div>
         </div>
+
+        {/* Targeting mode buttons */}
+        {isPlayerTurn && (
+          <div className="cs-targeting-bar">
+            <span className="cs-targeting-label">Target:</span>
+            <button className={`cs-target-mode-btn ${targetMode===TARGET_MODE.SINGLE_ENEMY?'active':''}`}
+              onClick={() => { setTargetMode(TARGET_MODE.SINGLE_ENEMY); setSelectedTargets([]) }}>
+              🎯 Single
+            </button>
+            <button className={`cs-target-mode-btn ${targetMode===TARGET_MODE.MULTI?'active':''}`}
+              onClick={() => { setTargetMode(TARGET_MODE.MULTI); setSelectedTargets([]) }}>
+              🎯🎯 Multi
+            </button>
+            <button className={`cs-target-mode-btn ${targetMode===TARGET_MODE.AOE?'active':''}`}
+              onClick={selectAoE}>
+              💥 AoE
+            </button>
+            <button className={`cs-target-mode-btn ${selectedTargets[0]==='player'?'active':''}`}
+              onClick={selectSelf}>
+              🧍 Self
+            </button>
+            {selectedTargets.length > 0 && (
+              <button className="cs-target-clear-btn" onClick={resetTargeting}>✕ Clear</button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Right: Actions */}
       <div className="cs-action-panel">
         <div className="cs-action-header">
-          {selectedTarget
-            ? <span className="cs-target-label">🎯 {enemies.find(e=>e.id===selectedTarget)?.name}</span>
-            : <span className="cs-target-hint">{isPlayerTurn?'Click an enemy to target':'Waiting for enemies…'}</span>}
+          {selectedTargets.length === 0
+            ? <span className="cs-target-hint">{isPlayerTurn?'Select a target above':'Enemies acting…'}</span>
+            : selectedTargets[0] === 'player'
+              ? <span className="cs-target-label" style={{color:'#a0c8ff'}}>🧍 Self-target</span>
+              : selectedTargets.length > 1
+                ? <span className="cs-target-label" style={{color:'#e8b84a'}}>🎯 {selectedTargets.length} targets</span>
+                : <span className="cs-target-label">🎯 {enemies.find(e=>e.id===selectedTargets[0])?.name || targetMode}</span>
+          }
         </div>
+
         <div className="cs-tabs">
-          {['actions','spells','bonus'].map(tab=>(
-            <button key={tab} className={`cs-tab ${activeTab===tab?'active':''}`} onClick={()=>setActiveTab(tab)}>
+          {['actions','spells','bonus'].map(tab => (
+            <button key={tab} className={`cs-tab ${activeTab===tab?'active':''}`} onClick={() => setActiveTab(tab)}>
               {tab==='actions'?'⚔️ Actions':tab==='spells'?'✨ Spells':'⚡ Bonus'}
             </button>
           ))}
         </div>
+
         <div className="cs-action-body">
           {!isPlayerTurn && <div className="cs-waiting">Enemies are acting…</div>}
 
+          {/* ACTIONS TAB */}
           {isPlayerTurn && activeTab==='actions' && (
             <div className="cs-action-list">
-              <button className={`cs-action-btn primary ${!selectedTarget||actionUsed?'disabled':''}`}
-                onClick={handlePlayerAttack} disabled={!selectedTarget||actionUsed}>
+              <button className={`cs-action-btn primary ${(!selectedTargets.length || selectedTargets[0]==='player' || actionUsed)?'disabled':''}`}
+                onClick={handlePlayerAttack}
+                disabled={!selectedTargets.length || selectedTargets[0]==='player' || actionUsed}>
                 <span className="cs-ab-icon">⚔️</span>
                 <span className="cs-ab-name">Attack</span>
                 <span className="cs-ab-detail">{getWeaponName()} · +{getPlayerAttackBonus()} to hit · {getPlayerDamageDice()}</span>
               </button>
-              {['Dash','Dodge','Disengage','Help','Hide'].map(a=>(
+              {['Dash','Dodge','Disengage','Help','Hide'].map(a => (
                 <button key={a} className={`cs-action-btn ${actionUsed?'disabled':''}`}
-                  onClick={()=>{if(!actionUsed){addLog('action',{actor:player.name,action:a});setActionUsed(true)}}}
+                  onClick={() => { if(!actionUsed){ addLog('action',{actor:player.name,action:a}); setActionUsed(true) } }}
                   disabled={actionUsed}>
                   <span className="cs-ab-name">{a}</span>
                 </button>
@@ -699,29 +1354,61 @@ Events:\n${logText}\nWrite only the narrative.`
             </div>
           )}
 
+          {/* SPELLS TAB */}
           {isPlayerTurn && activeTab==='spells' && (
             <div className="cs-spell-panel">
-              {knownSpells.length===0 && <div className="cs-empty">No spells known.</div>}
-              {Object.keys(availableSlots).length>0 && (
+              {knownSpells.length === 0 && <div className="cs-empty">No spells known.</div>}
+
+              {/* Slot selector */}
+              {Object.keys(availableSlots).length > 0 && (
                 <div className="cs-slot-row">
                   <span className="cs-slot-label">Slot:</span>
-                  {Object.entries(availableSlots).map(([lvl,count])=>(
-                    <button key={lvl} className={`cs-slot-btn ${selectedSlot===lvl?'active':''}`} onClick={()=>setSlot(p=>p===lvl?null:lvl)}>
+                  {Object.entries(availableSlots).map(([lvl,count]) => (
+                    <button key={lvl} className={`cs-slot-btn ${selectedSlot===lvl?'active':''}`}
+                      onClick={() => setSlot(p => p===lvl?null:lvl)}>
                       Lv{lvl} ({count})
                     </button>
                   ))}
                 </div>
               )}
+
               <div className="cs-spell-list">
-                {knownSpells.map(spell=>{
-                  const isCantrip = (character.spells||[]).find(s=>s.toLowerCase().includes(spell.toLowerCase())&&s.includes('cantrip'))
-                  const disabled  = !selectedTarget || actionUsed || (!isCantrip && !selectedSlot)
+                {knownSpells.map(spell => {
+                  const cleanSpell = spell.replace(/\s*\(cantrip\)/i, '').trim()
+                  const isCantrip  = (character.spells||[]).some(s =>
+                    s.toLowerCase().includes(cleanSpell.toLowerCase()) && s.toLowerCase().includes('cantrip')
+                  )
+                  const isFetching = spellFetching === cleanSpell
+
+                  // For display purposes, assume self-targeters & heals are always clickable
+                  // We don't know exactly until we fetch — but common sense defaults:
+                  // If no action used and (cantrip or slot selected) → always allow click
+                  const needsSlot    = !isCantrip
+                  const hasSlot      = !!selectedSlot
+                  const spellDisabled = actionUsed ||
+                                        isFetching ||
+                                        (needsSlot && !hasSlot)
+
                   return (
-                    <button key={spell} className={`cs-spell-btn ${isCantrip?'cantrip':''} ${disabled?'disabled':''}`}
-                      onClick={()=>!disabled&&handlePlayerSpell(spell, selectedSlot ? parseInt(selectedSlot, 10) : null)} disabled={disabled}
-                      title={!isCantrip&&!selectedSlot?'Select a spell slot level first':''}>
-                      <span className="cs-sb-name">{spell}</span>
-                      <span className="cs-sb-type">{isCantrip?'∞':selectedSlot?`Lv${selectedSlot}`:'—'}</span>
+                    <button
+                      key={spell}
+                      className={`cs-spell-btn ${isCantrip ? 'cantrip' : ''} ${spellDisabled ? 'disabled' : ''} ${isFetching ? 'fetching' : ''}`}
+                      onClick={() => !spellDisabled && handlePlayerSpell(spell, selectedSlot ? parseInt(selectedSlot, 10) : null)}
+                      disabled={spellDisabled}
+                      title={cleanSpell}
+                    >
+                      <div className="cs-spell-info">
+                        <span className="cs-sb-name">
+                          {isFetching ? '⏳' : '✨'} {cleanSpell}
+                        </span>
+                        <span className="cs-sb-desc">
+                          {isFetching ? 'Fetching from Open5e…' : (isCantrip ? 'Cantrip — free cast' : selectedSlot ? `Cast at level ${selectedSlot}` : 'Select a slot level above')}
+                        </span>
+                      </div>
+                      <div className="cs-spell-badges">
+                        {isCantrip && <span className="cs-spell-target-badge cantrip">∞</span>}
+                        {!isCantrip && <span className="cs-sb-type">{selectedSlot ? `Lv${selectedSlot}` : '—'}</span>}
+                      </div>
                     </button>
                   )
                 })}
@@ -729,62 +1416,53 @@ Events:\n${logText}\nWrite only the narrative.`
             </div>
           )}
 
+          {/* BONUS ACTIONS TAB */}
           {isPlayerTurn && activeTab==='bonus' && (
             <div className="cs-action-list">
-              {(CLASS_BONUS_ACTIONS[character.class]||[]).map(a=>(
+              {(CLASS_BONUS_ACTIONS[character.class]||[]).map(a => (
                 <button key={a.id} className={`cs-action-btn ${bonusUsed?'disabled':''}`}
-                  onClick={()=>{if(!bonusUsed){addLog('bonus_action',{actor:player.name,action:a.name});setBonusUsed(true)}}}
+                  onClick={() => { if(!bonusUsed){ addLog('bonus_action',{actor:player.name,action:a.name}); setBonusUsed(true) } }}
                   disabled={bonusUsed}>
                   <span className="cs-ab-icon">{a.icon}</span>
                   <span className="cs-ab-name">{a.name}</span>
-                  <span className="cs-ab-detail">{a.desc.slice(0,55)}{a.desc.length>55?'…':''}</span>
+                  <span className="cs-ab-detail">{a.desc.slice(0,55)}</span>
                 </button>
               ))}
-              {!(CLASS_BONUS_ACTIONS[character.class]||[]).length && <div className="cs-empty">No class bonus actions.</div>}
-
-              <div className="cs-inv-section">
-                <div className="cs-inv-title">🎒 Use Item (Bonus Action)</div>
-                {(character.equipment || []).filter(item => {
-                  const d = getItem(item)
-                  return d.category === ITEM_CATEGORIES.CONSUMABLE
-                }).filter((v,i,a) => a.indexOf(v) === i).map(item => {
-                  const d = getItem(item)
-                  return (
-                    <button key={item} className={`cs-action-btn ${bonusUsed ? 'disabled' : ''}`}
-                      onClick={() => {
-                        if (bonusUsed) return
-                        const result = applyItemEffect(item, { ...character, current_hp: player.hp, max_hp: player.maxHp })
-                        if (result.hpChange) {
-                          setPlayer(prev => ({ ...prev, hp: Math.min(prev.maxHp, prev.hp + result.hpChange) }))
-                          addLog('item_use', { actor: player.name, item, result: result.message })
-                        }
-                        setBonusUsed(true)
-                        // Tell parent to remove item from inventory
-                        if (result.consume) {
-                          const eq = [...(character.equipment || [])]
-                          const idx = eq.indexOf(item)
-                          if (idx > -1) eq.splice(idx, 1)
-                          // We can't call updateCharacterStats here directly but we pass it up
-                          if (window.__combatItemUsed) window.__combatItemUsed(item)
-                        }
-                      }}
-                      disabled={bonusUsed}>
-                      <span className="cs-ab-icon">{d.icon || '🧪'}</span>
-                      <span className="cs-ab-name">{item}</span>
-                      <span className="cs-ab-detail">{d.desc?.slice(0,50)}</span>
-                    </button>
-                  )
-                })}
-                {!(character.equipment||[]).some(item => getItem(item).category === ITEM_CATEGORIES.CONSUMABLE) && (
-                  <div className="cs-empty" style={{fontSize:'.68rem'}}>No consumables in inventory.</div>
-                )}
-              </div>
+              {!(CLASS_BONUS_ACTIONS[character.class]||[]).length && (
+                <div className="cs-empty">No class bonus actions.</div>
+              )}
+              {/* Bonus-action spells — known bonus-action spell names (Open5e fetched on click) */}
+              {knownSpells.filter(s => {
+                const clean = s.replace(/\s*\(cantrip\)/i, '').trim().toLowerCase()
+                // These are the common bonus-action spells from the SRD
+                const bonusActionSpells = [
+                  'healing word','shield of faith','hex','hunter's mark',
+                  'misty step','sanctuary','spiritual weapon','thunderous smite',
+                  'wrathful smite','searing smite','branding smite','swift quiver',
+                  'bonus action attack','mass healing word','armor of agathys',
+                  'hellish rebuke','shield','expeditious retreat',
+                ]
+                return bonusActionSpells.includes(clean)
+              }).map(spell => {
+                const cleanSpell = spell.replace(/\s*\(cantrip\)/i, '').trim()
+                const isFetching = spellFetching === cleanSpell
+                const disabled   = bonusUsed || isFetching
+                return (
+                  <button key={spell} className={`cs-action-btn ${disabled ? 'disabled' : ''}`}
+                    onClick={() => !disabled && handlePlayerSpell(spell, null)}
+                    disabled={disabled}>
+                    <span className="cs-ab-icon">{isFetching ? '⏳' : '⚡'}</span>
+                    <span className="cs-ab-name">{cleanSpell}</span>
+                    <span className="cs-ab-detail">{isFetching ? 'Fetching…' : 'Bonus action spell'}</span>
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>
 
         {isPlayerTurn && <button className="cs-end-turn" onClick={endPlayerTurn}>⏭ End Turn — Enemies Act</button>}
-        {isPlayerTurn && <button className="cs-flee" onClick={()=>onCombatEnd({fled:true,narrative:`${character.name} fled from battle.`,playerHP:player.hp})}>🏃 Flee</button>}
+        {isPlayerTurn && <button className="cs-flee" onClick={() => onCombatEnd({fled:true,narrative:`${character.name} fled.`,playerHP:player.hp})}>🏃 Flee</button>}
       </div>
     </div>
   )

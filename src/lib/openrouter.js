@@ -1,4 +1,5 @@
 // src/lib/openrouter.js
+import { buildArcPromptBlock } from './storyArcs'
 const API_KEY = process.env.REACT_APP_OPENROUTER_API_KEY
 const MODEL   = process.env.REACT_APP_MODEL || 'google/gemma-2-9b-it:free'
 
@@ -42,7 +43,7 @@ export function actionNeedsExtraction(playerAction) {
   return triggers.some(r => r.test(playerAction))
 }
 
-function buildSystemPrompt({ character: c, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters }) {
+function buildSystemPrompt({ character: c, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters, storyArcs }) {
   const charBlock = c ? `
 ═══ CHARACTER SHEET ═══
 Name: ${c.name} | Race: ${c.race} | Class: ${c.class}${c.subclass ? ` (${c.subclass})` : ''} | Background: ${c.background || '—'}
@@ -72,6 +73,9 @@ ${suggestedMonsters.join(', ')}
 IMPORTANT: When designing any encounter, prefer these creatures. Their stats are verified in the database. You may use variations (e.g. "Undead Wolf" based on Wolf stats).`
     : ''
 
+  // Story arc block — the narrative engine
+  const arcBlock = storyArcs?.length ? buildArcPromptBlock(storyArcs) : ''
+
   const monsterBlock = monsterContext ? `═══ MONSTER STAT BLOCKS (USE EXACTLY AS WRITTEN) ═══
 ${monsterContext}
 DO NOT invent or modify these stats. Use them exactly.` : ''
@@ -90,6 +94,7 @@ ${campaignSettings.house_rules ? `House Rules: ${campaignSettings.house_rules}` 
 
 ${charBlock}
 ${memBlock}
+${arcBlock}
 ${ragBlock}
 ${npcBlock}
 ${questBlock}
@@ -607,8 +612,8 @@ RULES:
   return data.choices?.[0]?.message?.content || '(no response)'
 }
 
-export async function callDM({ messages, character, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters }) {
-  const systemPrompt = buildSystemPrompt({ character, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters })
+export async function callDM({ messages, character, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters, storyArcs }) {
+  const systemPrompt = buildSystemPrompt({ character, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters, storyArcs })
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
