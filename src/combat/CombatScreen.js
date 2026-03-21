@@ -1436,7 +1436,7 @@ Events:\n${logText}\nWrite only the narrative.`
                 const clean = s.replace(/\s*\(cantrip\)/i, '').trim().toLowerCase()
                 // These are the common bonus-action spells from the SRD
                 const bonusActionSpells = [
-                  'healing word','shield of faith','hex','hunter's mark',
+                  'healing word','shield of faith','hex',"hunter's mark",
                   'misty step','sanctuary','spiritual weapon','thunderous smite',
                   'wrathful smite','searing smite','branding smite','swift quiver',
                   'bonus action attack','mass healing word','armor of agathys',

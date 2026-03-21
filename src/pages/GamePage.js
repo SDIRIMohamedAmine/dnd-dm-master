@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useCampaign } from '../hooks/useCampaign'
 import { callDM, callOpeningScene, cleanDMText } from '../lib/openrouter'
+import { supabase } from '../lib/supabase'
 import { retrieveFromSupabase, buildContextBlock, lookupMonsterStats, selectEncounterMonsters } from '../lib/rag'
 import {
   generateStoryArcs, loadStoryArcs, getDominantArc,
@@ -20,8 +21,10 @@ import CharacterEditModal  from '../components/CharacterEditModal'
 import CampaignSetupModal  from '../components/CampaignSetupModal'
 import CombatScreen        from '../combat/CombatScreen'
 import InventoryModal      from '../components/InventoryModal'
-import SkillCheckPanel     from '../components/SkillCheckPanel'
+import SkillCheckPanel      from '../components/SkillCheckPanel'
+import DeathSavingThrows   from '../components/DeathSavingThrows'
 import ArcStatus           from '../components/ArcStatus'
+import CompanionPanel      from '../components/CompanionPanel'
 import LootPanel          from '../components/LootPanel'
 import MerchantPanel      from '../components/MerchantPanel'
 import ArmorModal         from '../components/ArmorModal'
@@ -51,7 +54,8 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   const [speaking,     setSpeaking]     = useState(null)
   const [combatants,   setCombatants]   = useState(null)
   const [inCombat,     setInCombat]     = useState(false)
-  const [skillCheck,   setSkillCheck]   = useState(null)  // { skill, dc, statMod, desc }
+  const [skillCheck,   setSkillCheck]   = useState(null)
+  const [deathSaves,   setDeathSaves]   = useState(false)  // show death saving throws panel
   const [combatEnemies,  setCombatEnemies]  = useState([])
   const [showInventory,  setShowInventory]  = useState(false)
   const [lootTarget,     setLootTarget]     = useState(null)   // { name, isPickpocket }
@@ -80,6 +84,14 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
 
   useEffect(() => () => window.speechSynthesis?.cancel(), [])
 
+  // Retry arc generation once we have enough messages (first exchange complete)
+  useEffect(() => {
+    if (!character || !campaignId || storyArcs.length > 0 || messages.length < 2) return
+    generateStoryArcs(campaignId, userId, character, campaignData)
+      .then(generated => { if (generated?.length) setStoryArcs(generated) })
+      .catch(() => {})
+  }, [messages.length]) // eslint-disable-line
+
   // Pre-load monster suggestions from DB based on current character stats
   useEffect(() => {
     if (!character || !character.level) return
@@ -92,19 +104,19 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   useEffect(() => {
     if (!character || !campaignId || arcsInitialized) return
     setArcsInitialized(true)
-    const { user } = JSON.parse(localStorage.getItem('supabase_user') || '{}')
-    loadStoryArcs(campaignId).then(async arcs => {
-      if (arcs.length > 0) {
-        setStoryArcs(arcs)
-      } else if (character && messages.length >= 2) {
-        // Generate arcs after first real exchange so we have context
+    loadStoryArcs(campaignId).then(async loaded => {
+      if (loaded.length > 0) {
+        setStoryArcs(loaded)
+      } else if (messages.length >= 2) {
+        // Only generate after first real exchange (needs context)
         try {
           const generated = await generateStoryArcs(campaignId, userId, character, campaignData)
-          setStoryArcs(generated)
+          if (generated?.length) setStoryArcs(generated)
         } catch (e) { console.warn('[Arcs] Generation failed:', e.message) }
       }
+      // If messages < 2, a separate effect below will retry once messages grow
     })
-  }, [character, campaignId, messages.length >= 2]) // eslint-disable-line
+  }, [character?.id, campaignId]) 
 
   // FIX: Restore combat state from Supabase on load (survives refresh)
   useEffect(() => {
@@ -137,13 +149,13 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   }, [character?.current_hp]) // eslint-disable-line
 
   // Detect skill check requests from DM (🎲 Skill Check — DC X)
+  // Does NOT fire during combat — CombatScreen handles its own dice
   useEffect(() => {
-    if (!messages.length) return
+    if (!messages.length || inCombat) return
     const lastDM = [...messages].reverse().find(m => m.role === 'assistant')
     if (!lastDM || !character) return
     const text = lastDM.content
 
-    // Match: "🎲 Persuasion Check — DC 14" or "🎲 Stealth Check — DC 12"
     const checkMatch = text.match(/🎲\s+([A-Za-z\s]+?)\s+Check\s*[—–-]+\s*DC\s*(\d+)/i)
     if (checkMatch && !skillCheck) {
       const skill   = checkMatch[1].trim()
@@ -233,13 +245,22 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
 
       const chunks = await retrieveFromSupabase(combined, 6)
 
-      // For merchants: also fetch relevant magic items
+      // For merchants: fetch level-appropriate magic items
       if (isMerchant) {
-        const { supabase } = await import('../lib/supabase')
+        const charLevel = character?.level || 1
+        // Rarity tiers by character level
+        const rarityFilter = charLevel <= 4  ? ['common','uncommon']
+          : charLevel <= 8  ? ['uncommon','rare']
+          : charLevel <= 12 ? ['rare','very rare']
+          : ['very rare','legendary']
+
+        // Build OR filter for rarity
+        const rarityOr = rarityFilter.map(r => `content.ilike.%${r}%`).join(',')
         const { data: magicItems } = await supabase
           .from('knowledge_chunks')
           .select('chunk_id, type, name, source, content')
           .eq('type', 'magic-item')
+          .or(rarityOr)
           .order('name')
           .limit(8)
         if (magicItems?.length) {
@@ -255,7 +276,6 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
 
       // For monsters: fetch full stat blocks for creatures in context
       if (isMonster && chunks.length < 4) {
-        const { supabase } = await import('../lib/supabase')
         // Extract potential monster names from the DM text
         const monsterNames = dmSnippet.match(/(goblin|orc|wolf|troll|dragon|vampire|skeleton|zombie|quasit|bandit|cultist|gnoll|ogre|giant|wraith|ghoul|kobold|hobgoblin|bugbear|basilisk|medusa|harpy|manticore|owlbear|mimic)\w*/gi) || []
         for (const name of [...new Set(monsterNames)].slice(0, 3)) {
@@ -275,8 +295,7 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       if (isSkillCheck) {
         const skillMatch = combined.match(/(persuasion|deception|intimidation|stealth|perception|investigation|athletics|acrobatics|arcana|history|nature|religion|insight|medicine|survival|performance|sleight of hand|animal handling)/i)
         if (skillMatch) {
-          const { supabase } = await import('../lib/supabase')
-          const { data } = await supabase
+            const { data } = await supabase
             .from('knowledge_chunks')
             .select('chunk_id, type, name, source, content')
             .ilike('name', `%${skillMatch[1]}%`)
@@ -330,6 +349,8 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     const newItems = [...existing, ...Array(qty).fill(itemName)]
     await updateCharacterStats({ equipment: newItems })
     showGameEvent({ newItems:[itemName], removeItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    // Tell the DM what was looted so story continuity is maintained
+    await send(`I took the ${itemName} from the body.`)
   }
 
   async function handleTakeAll(items) {
@@ -337,6 +358,8 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     const newItems = [...existing, ...items.flatMap(i => Array(i.qty).fill(i.name))]
     await updateCharacterStats({ equipment: newItems })
     showGameEvent({ newItems: items.map(i => i.name), removeItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    const itemList = items.map(i => i.qty > 1 ? `${i.qty}× ${i.name}` : i.name).join(', ')
+    await send(`I looted the body and took: ${itemList}.`)
   }
 
   // ── MERCHANT HANDLING ────────────────────────────────────
@@ -350,6 +373,7 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     const newGold  = Math.max(0, (character.gold || 0) - cost)
     await updateCharacterStats({ equipment: newItems, gold: newGold })
     showGameEvent({ newItems:[itemName], goldChange: -cost, removeItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[], levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    await send(`I bought ${qty > 1 ? qty + '× ' : ''}${itemName} for ${cost} gp.`)
   }
 
   async function handleSellItem(itemName, qty, earned) {
@@ -359,6 +383,7 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     const newGold  = (character.gold || 0) + earned
     await updateCharacterStats({ equipment: newItems, gold: newGold })
     showGameEvent({ removeItems:[itemName], goldChange: earned, newItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[], levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    await send(`I sold my ${itemName} for ${earned} gp.`)
   }
 
   async function handleSkillCheckResult(roll) {
@@ -675,6 +700,21 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
           onClose={() => setMerchantData(null)}
         />
       )}
+      {deathSaves && character && (
+        <DeathSavingThrows
+          characterName={character.name}
+          onStabilized={async (hpGain) => {
+            setDeathSaves(false)
+            await updateCharacterStats({ current_hp: Math.max(1, hpGain) })
+            if (hpGain > 0) await send(`I regained ${hpGain} HP on a natural 20 and am back on my feet!`)
+            else await send('I stabilized — I am unconscious but stable.')
+          }}
+          onDied={async () => {
+            setDeathSaves(false)
+            await send('I failed my death saving throws. I am dead.')
+          }}
+        />
+      )}
       {skillCheck && (
         <SkillCheckPanel
           check={skillCheck}
@@ -719,6 +759,7 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
             <span className="game-sep">·</span>
             <span>Lv {character.level} {character.class}</span>
             <span className="game-sep">·</span>
+            {character.avatar && <span style={{fontSize:'1.1rem'}}>{character.avatar}</span>}
             <span style={{ color: hpColor }}>HP {character.current_hp}/{character.max_hp}</span>
             <span className="game-sep">·</span>
             <span className="game-gold">⚙ {character.gold ?? 10} gp</span>
@@ -736,6 +777,8 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
           {storyArcs.length > 0 && (
             <button className="game-sidebar-btn" onClick={() => setSidebar(prev => prev === 'arcs' ? null : 'arcs')}>🌍 World</button>
           )}
+          <button className={`game-sidebar-btn ${sidebar==='companions'?'active':''}`}
+            onClick={() => setSidebar(prev => prev==='companions'?null:'companions')}>🤝</button>
           {inCombat && (
             <button
               className={`game-sidebar-btn combat-active-btn`}
@@ -950,26 +993,43 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
 
             {sidebar === 'quests' && (
               <div className="quests-panel">
-                <div className="panel-title">📜 Quests</div>
-                {quests.length === 0 && <div className="panel-empty">No quests yet.</div>}
+                <div className="panel-title">📜 Quests
+                  <span className="panel-title-sub">{activeQuests.length} active</span>
+                </div>
+                {quests.length === 0 && (
+                  <div className="panel-empty">
+                    No quests yet.<br/>
+                    <span style={{fontSize:'.7rem',opacity:.6}}>Talk to NPCs and explore to discover quests.</span>
+                  </div>
+                )}
                 {['active','completed','failed'].map(status => {
                   const filtered = quests.filter(q => q.status === status)
                   if (!filtered.length) return null
                   return (
-                    <div key={status}>
+                    <div key={status} className="quest-group">
                       <div className={`quest-status-label quest-status-${status}`}>
                         {status==='active'?'🟡 Active':status==='completed'?'✅ Completed':'❌ Failed'}
+                        <span className="quest-count">{filtered.length}</span>
                       </div>
                       {filtered.map(q => (
                         <div key={q.id} className={`quest-card quest-${q.status}`}>
-                          <div className="quest-title">{q.title}</div>
-                          {q.giver       && <div className="quest-meta">From: {q.giver}</div>}
+                          <div className="quest-title-row">
+                            <div className="quest-title">{q.title}</div>
+                            {q.status==='active' && (
+                              <div className="quest-actions">
+                                <button className="quest-btn quest-btn-complete" title="Mark complete" onClick={() => updateQuestStatus(q.id,'completed')}>✓</button>
+                                <button className="quest-btn quest-btn-fail"     title="Mark failed"   onClick={() => updateQuestStatus(q.id,'failed')}>✗</button>
+                              </div>
+                            )}
+                          </div>
+                          {q.giver       && <div className="quest-meta">📍 From: {q.giver}</div>}
                           {q.description && <div className="quest-desc">{q.description}</div>}
-                          {q.reward      && <div className="quest-reward">🏆 {q.reward}</div>}
+                          {q.reward      && <div className="quest-reward">🏆 Reward: {q.reward}</div>}
+                          {/* Progress bar for active quests */}
                           {q.status==='active' && (
-                            <div className="quest-actions">
-                              <button className="quest-btn quest-btn-complete" onClick={() => updateQuestStatus(q.id,'completed')}>✓</button>
-                              <button className="quest-btn quest-btn-fail"     onClick={() => updateQuestStatus(q.id,'failed')}>✗</button>
+                            <div className="quest-progress-wrap">
+                              <div className="quest-progress-bar"
+                                style={{width: q.progress ? `${Math.min(100,q.progress)}%` : '15%'}}/>
                             </div>
                           )}
                         </div>

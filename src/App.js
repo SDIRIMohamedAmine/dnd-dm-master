@@ -1,5 +1,5 @@
 // src/App.js — with React Router routing
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { AuthProvider, useAuth } from './lib/AuthContext'
 import AuthPage          from './pages/AuthPage'
@@ -54,10 +54,10 @@ function CreateRoute({ onComplete, onBack }) {
   const { id } = useParams()
   const [title, setTitle] = useState(null)
 
-  useState(() => {
+  useEffect(() => {
     supabase.from('campaigns').select('title').eq('id',id).single()
       .then(({data}) => setTitle(data?.title||'New Campaign'))
-  }, [id])
+  }, [id]) // eslint-disable-line
 
   return (
     <CharacterCreation
@@ -74,10 +74,10 @@ function PlayRoute({ onBack }) {
   const navigate  = useNavigate()
   const [camp, setCamp] = useState(null)
 
-  useState(() => {
+  useEffect(() => {
     supabase.from('campaigns').select('*').eq('id',id).single()
       .then(({data}) => setCamp(data))
-  }, [id])
+  }, [id]) // eslint-disable-line
 
   if (!camp) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--parch3)',fontFamily:'var(--font-display)',fontSize:'.85rem',letterSpacing:'.1em'}}>Loading…</div>
 

@@ -170,3 +170,16 @@
   0%,100% { box-shadow: 0 0 0 0 rgba(200,60,20,0); }
   50%      { box-shadow: 0 0 0 4px rgba(200,60,20,0.2); }
 }
+
+/* Quest log upgrades */
+.panel-title-sub { font-family:var(--font-body);font-size:.65rem;color:var(--parch3);font-weight:normal;margin-left:8px; }
+.quest-group { display:flex;flex-direction:column;gap:4px; }
+.quest-status-label { display:flex;align-items:center;justify-content:space-between; }
+.quest-count { font-family:var(--font-mono);font-size:.62rem;background:rgba(200,146,42,.12);border:1px solid rgba(200,146,42,.2);border-radius:8px;padding:1px 7px;color:var(--gold); }
+.quest-title-row { display:flex;align-items:flex-start;justify-content:space-between;gap:6px; }
+.quest-title { flex:1; }
+.quest-meta { font-size:.68rem;color:var(--parch3); }
+.quest-desc { font-size:.72rem;color:var(--parch2);line-height:1.45; }
+.quest-reward { font-size:.7rem;color:var(--gold);background:rgba(200,146,42,.07);border-radius:5px;padding:3px 8px;margin-top:2px; }
+.quest-progress-wrap { height:3px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden;margin-top:6px; }
+.quest-progress-bar { height:100%;background:linear-gradient(90deg,rgba(200,146,42,.4),rgba(200,146,42,.7));border-radius:2px;transition:width .5s ease; }

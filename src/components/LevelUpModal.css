@@ -127,3 +127,14 @@
 .lvlup-finish { padding:10px 28px; background:linear-gradient(135deg,#2a6020 0%,#1a4010 100%); border:1px solid rgba(78,203,113,.5); border-radius:var(--radius-md); color:#a0f0a0; font-family:var(--font-display); font-size:.78rem; letter-spacing:.12em; cursor:pointer; transition:all .2s; }
 .lvlup-finish:hover:not(:disabled) { background:linear-gradient(135deg,#3a8030,#2a6020); }
 .lvlup-finish:disabled              { opacity:.4; cursor:not-allowed; }
+
+/* Subclass grid */
+.lvlup-subclass-grid { display:flex;flex-direction:column;gap:7px;margin-top:8px; }
+.lvlup-subclass-btn {
+  padding:11px 16px;text-align:left;border-radius:8px;
+  background:rgba(255,255,255,.03);border:1px solid var(--border);
+  color:var(--parch2);font-size:.82rem;cursor:pointer;transition:all .15s;
+}
+.lvlup-subclass-btn:hover    { border-color:rgba(200,146,42,.4);color:var(--parch); }
+.lvlup-subclass-btn.selected { border-color:var(--gold);background:rgba(200,146,42,.12);color:var(--parch); }
+.lvlup-hint { font-size:.75rem;color:var(--parch3);line-height:1.5;margin:0 0 6px; }

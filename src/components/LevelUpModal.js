@@ -1,6 +1,7 @@
 // src/components/LevelUpModal.js
 import { useState } from 'react'
 import { CLASS_FEATURES, getSpellsForLevel, getSpellsToLearnCount, hpGainForLevel } from '../lib/classData'
+import { CLASSES } from '../lib/dndData'
 import './LevelUpModal.css'
 
 const STAT_NAMES = ['strength','dexterity','constitution','intelligence','wisdom','charisma']
@@ -15,16 +16,22 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
   const spellCount  = getSpellsToLearnCount(character.class, newLevel)
   const showASI     = ASI_LEVELS.has(newLevel)
 
-  const [asiMode,      setAsiMode]      = useState('one')
-  const [asiStat1,     setAsiStat1]     = useState('')
-  const [asiStat2,     setAsiStat2]     = useState('')
-  const [chosenSpells, setChosenSpells] = useState([])
-  const [saving,       setSaving]       = useState(false)
-  const [step,         setStep]         = useState(0) // 0=features, 1=hp, 2=spells, 3=asi
+  const [asiMode,       setAsiMode]      = useState('one')
+  const [asiStat1,      setAsiStat1]     = useState('')
+  const [asiStat2,      setAsiStat2]     = useState('')
+  const [chosenSpells,  setChosenSpells] = useState([])
+  const [chosenSubclass,setChosenSubclass] = useState(character.subclass || '')
+  const [saving,        setSaving]       = useState(false)
+  const [step,          setStep]         = useState(0)
+
+  // Subclass choice at level 3 (if not already chosen)
+  const clsData          = CLASSES.find(c => c.name === character.class)
+  const needsSubclass    = newLevel === 3 && !character.subclass && clsData?.subclasses?.length > 0
 
   // Calculate steps to show
   const steps = ['features']
   steps.push('hp')
+  if (needsSubclass) steps.push('subclass')
   if (availableSpells.length > 0 && spellCount > 0) steps.push('spells')
   if (showASI) steps.push('asi')
   const currentStep  = steps[step]
@@ -39,6 +46,7 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
   }
 
   function canAdvance() {
+    if (currentStep === 'subclass' && needsSubclass && !chosenSubclass) return false
     if (currentStep === 'spells' && spellCount > 0 && chosenSpells.length < Math.min(spellCount, availableSpells.length)) return false
     if (currentStep === 'asi' && showASI) {
       if (asiMode === 'one'  && !asiStat1)            return false
@@ -56,6 +64,9 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
       xp_to_next_level:  require('../lib/subclasses').xpToNextLevel(newLevel),
       proficiency_bonus: require('../lib/subclasses').proficiencyBonus(newLevel),
     }
+
+    // Save subclass choice
+    if (chosenSubclass && !character.subclass) updates.subclass = chosenSubclass
 
     // Add chosen spells
     if (chosenSpells.length > 0) {
@@ -77,6 +88,23 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
     const { buildInitialSlots } = require('../lib/spellSlots')
     const newSlots = buildInitialSlots(character.class, newLevel)
     if (Object.keys(newSlots).length > 0) updates.spell_slots = newSlots
+
+    // Recalculate AC if DEX or CON changed (e.g. Barbarian Unarmored Defense)
+    const newDex = updates.dexterity || character.dexterity || 10
+    const newCon = updates.constitution || character.constitution || 10
+    const newWis = updates.wisdom || character.wisdom || 10
+    const dexMod = Math.floor((newDex - 10) / 2)
+    const conMod2 = Math.floor((newCon - 10) / 2)
+    const wisMod = Math.floor((newWis - 10) / 2)
+    if (updates.dexterity || updates.constitution || updates.wisdom) {
+      // Recalculate only if unarmored (no chest armor equipped)
+      const equipped = character.equipped || {}
+      if (!equipped.chest) {
+        if (character.class === 'Barbarian') updates.armor_class = 10 + dexMod + conMod2
+        else if (character.class === 'Monk')  updates.armor_class = 10 + dexMod + wisMod
+        else                                   updates.armor_class = 10 + dexMod
+      }
+    }
 
     await onSave(updates)
     setSaving(false)

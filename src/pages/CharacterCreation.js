@@ -16,6 +16,14 @@ const GENDERS  = [
   { label:'✨ Other', val:'Other' },
 ]
 
+const AVATARS_BY_RACE = {
+  Human:['👨','👩','🧔','👱','🧑'], Elf:['🧝','🧝‍♀️','🧙','🌿','⭐'],
+  Dwarf:['⛏️','🪨','🧔','🍺','⚒️'], Halfling:['🌿','🍀','🐾','🌱','🧚'],
+  Gnome:['🔮','⚙️','🔭','🧪','🎩'], 'Half-Elf':['🌙','✨','🌟','🌒','💫'],
+  'Half-Orc':['💪','🪓','⚔️','🛡️','🔥'], Tiefling:['😈','🔥','🌑','💜','👿'],
+  Dragonborn:['🐲','🔥','⚡','❄️','🌊'], Aasimar:['😇','✨','🌟','☀️','🕊️'],
+}
+
 function statMod(score) {
   const m = Math.floor((score - 10) / 2)
   return m >= 0 ? `+${m}` : `${m}`
@@ -37,7 +45,7 @@ export default function CharacterCreation({ campaignTitle, onComplete, onBack })
   const [aiLoading, setAiLoading] = useState(false)
 
   const [form, setForm] = useState({
-    name:'', race:'', gender:'', class:'', subclass:'',
+    name:'', race:'', gender:'', class:'', subclass:'', avatar:'',
     background:'', alignment:'',
     assigned:{}, // statName → value
     equipment:[], spells:[],
@@ -180,6 +188,7 @@ Write flowing prose — no headers, no lists. End on why ${sub} began adventurin
 
       await onComplete({
         name: form.name.trim(),
+        avatar: form.avatar || (AVATARS_BY_RACE[form.race]?.[0] || '⚔️'),
         race: form.race,
         class: form.class,
         subclass: form.subclass || null,
@@ -253,6 +262,18 @@ Write flowing prose — no headers, no lists. End on why ${sub} began adventurin
                 ))}
               </div>
             </div>
+            {form.race && (
+              <div className="cc-field">
+                <label className="cc-field-label">Avatar</label>
+                <div className="cc-gender-row">
+                  {(AVATARS_BY_RACE[form.race] || ['⚔️','🗡️','🛡️','🔮','✨']).map(a => (
+                    <button key={a} className={`cc-gender-btn ${form.avatar===a?'selected':''}`}
+                      style={{fontSize:'1.4rem',padding:'8px 12px'}}
+                      onClick={()=>set('avatar',a)}>{a}</button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="cc-field">
               <label className="cc-field-label">Race *</label>
               <div className="cc-card-grid">

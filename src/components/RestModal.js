@@ -4,9 +4,11 @@ import { HIT_DICE, restoreAllSlots, restoreWarlockSlots } from '../lib/spellSlot
 import './RestModal.css'
 
 export default function RestModal({ character, onRest, onClose }) {
-  const [restType, setRestType]     = useState(null)   // 'short' | 'long'
+  const [restType, setRestType]     = useState(null)
   const [hitDiceToSpend, setDice]   = useState(0)
-  const [saving, setSaving]         = useState(false)
+  const [saving,    setSaving]      = useState(false)
+  const [lastRolls, setLastRolls]   = useState([])
+  const [hpGained,  setHpGained]    = useState(null)
 
   const hitDie        = HIT_DICE[character.class] || 8
   const maxHitDice    = character.level
@@ -18,28 +20,42 @@ export default function RestModal({ character, onRest, onClose }) {
   // Estimate HP recovery per hit die
   const avgPerDie = Math.floor(hitDie / 2) + 1 + conMod
 
+  // Roll hit dice on rest (not average)
+  function rollHitDice(count, sides, conMod) {
+    let total = 0
+    const rolls = []
+    for (let i = 0; i < count; i++) {
+      const r = Math.floor(Math.random() * sides) + 1
+      rolls.push(r)
+      total += Math.max(1, r + conMod)
+    }
+    return { total, rolls }
+  }
+
   async function confirmRest() {
     setSaving(true)
     const updates = {}
 
     if (restType === 'short') {
-      // Spend hit dice to recover HP
-      const hpGain = hitDiceToSpend * avgPerDie
+      // Roll actual hit dice instead of using average
+      const { total: hpGain, rolls } = rollHitDice(hitDiceToSpend, hitDie, conMod)
+      setLastRolls(rolls)
+      setHpGained(hpGain)
       updates.current_hp     = Math.min(character.max_hp, character.current_hp + hpGain)
       updates.hit_dice_used  = usedHitDice + hitDiceToSpend
-      // Warlock regains spell slots on short rest
       if (isWarlock && character.spell_slots) {
         updates.spell_slots = restoreWarlockSlots(character.spell_slots)
       }
     }
 
     if (restType === 'long') {
-      // Full HP, recover half hit dice, restore all spell slots
       updates.current_hp    = character.max_hp
       updates.hit_dice_used = Math.max(0, Math.floor(usedHitDice / 2))
-      if (character.spell_slots) {
-        updates.spell_slots = restoreAllSlots(character.spell_slots)
-      }
+      if (character.spell_slots) updates.spell_slots = restoreAllSlots(character.spell_slots)
+      // Clear conditions that end on long rest
+      const persistentConditions = ['Exhaustion'] // only exhaustion persists (reduced by 1 level)
+      const currentConds = character.conditions || []
+      updates.conditions = currentConds.filter(c => persistentConditions.includes(c))
     }
 
     await onRest(restType, updates)
@@ -89,8 +105,14 @@ export default function RestModal({ character, onRest, onClose }) {
                   <button className="rest-hd-btn" onClick={() => setDice(d => Math.min(availableHD, d + 1))} disabled={hitDiceToSpend >= availableHD}>+</button>
                 </div>
                 <div className="rest-hd-preview">
-                  HP recovery ≈ <strong>+{hitDiceToSpend * avgPerDie}</strong>
-                  {' '}(from {character.current_hp} → ~{Math.min(character.max_hp, character.current_hp + hitDiceToSpend * avgPerDie)})
+                  {hpGained !== null ? (
+                    <>
+                      <strong>Rolled: {lastRolls.join(', ')} (+{conMod} each) = +{hpGained} HP</strong>
+                      <span> → {Math.min(character.max_hp, character.current_hp + hpGained)} HP</span>
+                    </>
+                  ) : (
+                    <>HP recovery: roll {hitDiceToSpend}d{hitDie}{conMod >= 0 ? `+${conMod*hitDiceToSpend}` : `${conMod*hitDiceToSpend}`} (avg ≈ +{hitDiceToSpend * avgPerDie})</>
+                  )}
                 </div>
               </div>
             )}

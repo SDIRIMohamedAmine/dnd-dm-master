@@ -46,7 +46,7 @@ export function actionNeedsExtraction(playerAction) {
 function buildSystemPrompt({ character: c, memory, ragContext, npcs, quests, campaignSettings, monsterContext, suggestedMonsters, storyArcs }) {
   const charBlock = c ? `
 ═══ CHARACTER SHEET ═══
-Name: ${c.name} | Race: ${c.race} | Class: ${c.class}${c.subclass ? ` (${c.subclass})` : ''} | Background: ${c.background || '—'}
+${c.avatar ? c.avatar + ' ' : ''}${c.name} | Race: ${c.race} | Class: ${c.class}${c.subclass ? ` (${c.subclass})` : ''} | Background: ${c.background || '—'}
 Gender: ${c.gender || 'unspecified'} | Pronouns: ${c.gender === 'Male' ? 'he/him' : c.gender === 'Female' ? 'she/her' : c.gender === 'Non-binary' ? 'they/them' : 'they/them'}
 Alignment: ${c.alignment} | Level: ${c.level} | XP: ${c.experience} / ${c.xp_to_next_level || 300}
 HP: ${c.current_hp}/${c.max_hp} | AC: ${c.armor_class} | Speed: ${c.speed}ft | Gold: ${c.gold ?? 10} gp
