@@ -1,16 +1,24 @@
 // src/pages/GamePage.js
 import { useState, useRef, useEffect } from 'react'
 import { useCampaign } from '../hooks/useCampaign'
-import { callDM, callOpeningScene, cleanDMText } from '../lib/openrouter'
+import { callDM, callOpeningScene, cleanDMText, shouldTriggerCombat, detectPromptMode, callAmbientDetail } from '../lib/openrouter'
+import { getPassivePerception, getSkillBonus } from '../lib/dndData'
 import { supabase } from '../lib/supabase'
+import { migrateToCurrency, formatCurrencyShort, formatCurrency, addGold } from '../lib/currency'
 import { retrieveFromSupabase, buildContextBlock, lookupMonsterStats, selectEncounterMonsters } from '../lib/rag'
-import {
-  generateStoryArcs, loadStoryArcs, getDominantArc,
+import { executeSlashCommand } from '../lib/slashCommandExecutor'
+import { parseSlashCommand, COMMAND_REGISTRY } from '../lib/slashCommands'
+import { ACTION_TYPES, validateAction, resolveAction, buildMechanicalContext } from '../lib/actionPipeline'
+import { buildContentContextBlock } from '../lib/contentRegistry'
+import { loadCompiledSpell, compileSpell, listCompiledSpells } from '../lib/spellCompiler'
+import { getItem, applyItemEffect, detectItemSlot, calculateAC, getEquippedPassives, resolveItem, getEquipStatUpdates, getUnequipStatUpdates } from '../lib/items'
+  import {generateStoryArcs, loadStoryArcs, getDominantArc,
   extractArcDeltas, updateArcPower, buildArcPromptBlock, fetchArcLore,
 } from '../lib/storyArcs'
 import DiceRoller          from '../components/DiceRoller'
 import LevelUpModal        from '../components/LevelUpModal'
 import RestModal           from '../components/RestModal'
+import PreparedSpellsModal from '../components/PreparedSpellsModal'
 import SpellSlotTracker    from '../components/SpellSlotTracker'
 import SuggestedActions    from '../components/SuggestedActions'
 import AmbientSound        from '../components/AmbientSound'
@@ -25,6 +33,10 @@ import SkillCheckPanel      from '../components/SkillCheckPanel'
 import DeathSavingThrows   from '../components/DeathSavingThrows'
 import ArcStatus           from '../components/ArcStatus'
 import CompanionPanel      from '../components/CompanionPanel'
+import NPCPanel           from '../components/NPCPanel'
+import ContentCreator     from '../components/ContentCreator'
+import AdventureLog       from '../components/AdventureLog'
+import SpellbookPanel     from '../components/SpellbookPanel'
 import LootPanel          from '../components/LootPanel'
 import MerchantPanel      from '../components/MerchantPanel'
 import ArmorModal         from '../components/ArmorModal'
@@ -33,7 +45,7 @@ import './GamePage.css'
 
 export default function GamePage({ campaignId, userId, campaign, onBack, onCampaignUpdate }) {
   const {
-    messages, character, memory, npcs, quests, loading,
+    messages, character, memory, npcs, quests, loading, error: campaignError,
     saveMessage, updateCharacterStats, processDMReply,
     deleteLastAssistantMessage, updateQuestStatus,
     performRest, spendSpellSlot, restoreSpellSlot,
@@ -48,6 +60,8 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   const [hpInput,      setHpInput]      = useState('')
   const [levelUpData,  setLevelUpData]  = useState(null)
   const [showRest,     setShowRest]     = useState(false)
+  const [showPrepSpells,   setShowPrepSpells]   = useState(false)
+  const [showContentCreator, setShowContentCreator] = useState(false)
   const [showSummary,  setShowSummary]  = useState(false)
   const [showEditChar, setShowEditChar] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -66,6 +80,10 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   const [storyArcs,        setStoryArcs]        = useState([])
   const [suggestionsEnabled, setSuggestionsEnabled] = useState(false)
   const [arcsInitialized,  setArcsInitialized]  = useState(false)
+  const [autoScene,        setAutoScene]        = useState(null)
+  const [hasInspiration,   setHasInspiration]   = useState(false)
+  const [slashHints,       setSlashHints]       = useState([])  // autocomplete suggestions
+  const [exhaustionLevel,  setExhaustionLevel]  = useState(0)
   const lastCombatMsgId = useRef(null)
   const [campaignData, setCampaignData] = useState(campaign || {})
   const bottomRef    = useRef(null)
@@ -169,13 +187,9 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
         arcana:'intelligence', history:'intelligence', investigation:'intelligence', nature:'intelligence', religion:'intelligence',
       }
       const statKey  = skillToStat[skill.toLowerCase()] || 'charisma'
-      const statVal  = character[statKey] || 10
-      const statMod_ = Math.floor((statVal - 10) / 2)
-      const profBonus = character.proficiency_bonus || 2
-      // Check if character has proficiency (background skills or class saves)
-      const profSkills = character.skill_proficiencies || []
-      const hasProficiency = profSkills.some(s => s.toLowerCase().includes(skill.toLowerCase()))
-      const totalMod = statMod_ + (hasProficiency ? profBonus : 0)
+      const totalMod = getSkillBonus(character, skill)
+      const statMod_ = Math.floor(((character[statKey] || 10) - 10) / 2)
+      const hasProficiency = (character.skill_proficiencies || []).some(s => s.toLowerCase().includes(skill.toLowerCase()))
       setSkillCheck({ skill, dc, statMod: totalMod, statKey, rawMod: statMod_, proficient: hasProficiency })
     }
   }, [messages]) // eslint-disable-line
@@ -304,7 +318,47 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
         }
       }
 
-      return buildContextBlock(chunks.slice(0, 7))
+      // Pull lore for dominant story arc tags — keeps world-building grounded in DB
+      const dominantArc = storyArcs?.sort((a, b) => b.power - a.power)[0]
+      if (dominantArc?.lore_tags?.length && chunks.length < 6) {
+        for (const tag of dominantArc.lore_tags.slice(0, 2)) {
+          const { data: arcData } = await supabase
+            .from('knowledge_chunks')
+            .select('chunk_id, type, name, source, content')
+            .or(`type.eq.monster,type.eq.section`)
+            .ilike('content', `%${tag}%`)
+            .limit(2)
+          if (arcData) {
+            const seen = new Set(chunks.map(c => c.id))
+            for (const row of arcData) {
+              if (!seen.has(row.chunk_id) && chunks.length < 8) {
+                chunks.push({ id: row.chunk_id, type: row.type, name: row.name, source: row.source, text: row.content })
+                seen.add(row.chunk_id)
+              }
+            }
+          }
+        }
+      }
+
+      // Pull condition rules if character has active conditions
+      if (character?.conditions?.length) {
+        for (const cond of character.conditions.slice(0, 2)) {
+          const { data: condData } = await supabase
+            .from('knowledge_chunks')
+            .select('chunk_id, type, name, source, content')
+            .eq('type', 'condition')
+            .ilike('name', `%${cond}%`)
+            .limit(1)
+          if (condData?.[0]) {
+            const seen = new Set(chunks.map(c => c.id))
+            if (!seen.has(condData[0].chunk_id)) {
+              chunks.push({ id: condData[0].chunk_id, type: condData[0].type, name: condData[0].name, source: condData[0].source, text: condData[0].content })
+            }
+          }
+        }
+      }
+
+      return buildContextBlock(chunks.slice(0, 8))
     }
     catch { return '' }
   }
@@ -325,18 +379,76 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     if (idx !== -1) await updateCharacterStats({ equipment: [...eq.slice(0, idx), ...eq.slice(idx + 1)] })
   }
 
-  async function handleEquipArmor(slot, itemName) {
-    const { calculateAC } = await import('../lib/items')
+  async function handleEquipArmor(slot, itemName, attune = false) {
+    // Resolve item data — checks ITEM_DB first, then RAG database for unknown items
+    const itemData = await resolveItem(itemName)
     const equipped = { ...(character.equipped || {}), [slot]: itemName }
-    const newAC    = calculateAC(equipped, { dexterity: character.dexterity, constitution: character.constitution, wisdom: character.wisdom, class: character.class })
-    await updateCharacterStats({ equipped, armor_class: newAC })
+
+    // Recalculate AC with new item in slot
+    const newAC = calculateAC(equipped, {
+      dexterity: character.dexterity, constitution: character.constitution,
+      wisdom: character.wisdom, class: character.class,
+    })
+
+    // Apply any stat-setting effects (Amulet of Health → CON 19, etc.)
+    const statUpdates = getEquipStatUpdates(itemData, character)
+
+    // If CON changed, recalculate max HP delta
+    let hpUpdates = {}
+    if (statUpdates.constitution) {
+      const oldConMod = Math.floor(((character.constitution || 10) - 10) / 2)
+      const newConMod = Math.floor((statUpdates.constitution - 10) / 2)
+      const hpDelta   = (newConMod - oldConMod) * (character.level || 1)
+      if (hpDelta > 0) {
+        hpUpdates = {
+          max_hp:     (character.max_hp || 10) + hpDelta,
+          current_hp: (character.current_hp || 10) + hpDelta,
+        }
+      }
+    }
+
+    // Handle attunement flag — stored as `${slot}_attuned`
+    if (attune) equipped[`${slot}_attuned`] = true
+    else if (attune === false && equipped[`${slot}_attuned`]) {
+      // Removing attunement — stat effects no longer apply
+      equipped[`${slot}_attuned`] = false
+    }
+    await updateCharacterStats({ equipped, armor_class: newAC, ...statUpdates, ...hpUpdates })
+
+    // Toast notification for passive effects
+    if (itemData?.passive) {
+      showGameEvent({ ambientDetail: `✦ ${itemName}: ${itemData.passive}` })
+    }
   }
 
   async function handleUnequipArmor(slot) {
-    const { calculateAC } = await import('../lib/items')
+    const itemName = character.equipped?.[slot]
+    const itemData = itemName ? await resolveItem(itemName) : null
     const equipped = { ...(character.equipped || {}), [slot]: null }
-    const newAC    = calculateAC(equipped, { dexterity: character.dexterity, constitution: character.constitution, wisdom: character.wisdom, class: character.class })
-    await updateCharacterStats({ equipped, armor_class: newAC })
+
+    const newAC = calculateAC(equipped, {
+      dexterity: character.dexterity, constitution: character.constitution,
+      wisdom: character.wisdom, class: character.class,
+    })
+
+    // Reverse stat effects when unequipping
+    const statRestores = getUnequipStatUpdates(itemData, character, null)
+
+    // Reverse CON-based HP if applicable
+    let hpUpdates = {}
+    if (statRestores.constitution) {
+      const oldConMod = Math.floor(((character.constitution || 10) - 10) / 2)
+      const newConMod = Math.floor((statRestores.constitution - 10) / 2)
+      const hpDelta   = (newConMod - oldConMod) * (character.level || 1)
+      if (hpDelta < 0) {
+        hpUpdates = {
+          max_hp:     Math.max(1, (character.max_hp || 10) + hpDelta),
+          current_hp: Math.max(1, (character.current_hp || 10) + hpDelta),
+        }
+      }
+    }
+
+    await updateCharacterStats({ equipped, armor_class: newAC, ...statRestores, ...hpUpdates })
   }
 
   // ── LOOT HANDLING ───────────────────────────────────────
@@ -388,16 +500,24 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
 
   async function handleSkillCheckResult(roll) {
     if (!skillCheck) return
-    const total   = roll + skillCheck.statMod
-    const success = total >= skillCheck.dc
-    const isCrit  = roll === 20
+    const total    = roll + skillCheck.statMod
+    const success  = total >= skillCheck.dc
+    const isCrit   = roll === 20
     const isFumble = roll === 1
+    const profBonus = character.proficiency_bonus || 2
+    const isExpert  = (character.expertise_skills || []).some(s => s.toLowerCase() === skillCheck.skill.toLowerCase())
+    // Build a clear breakdown string for the DM
+    const bonusBreakdown = isExpert
+      ? `${roll} + ${skillCheck.rawMod} (${skillCheck.skill}) + ${profBonus * 2} (expertise) = **${total}**`
+      : skillCheck.proficient
+        ? `${roll} + ${skillCheck.rawMod} (${skillCheck.skill}) + ${profBonus} (prof) = **${total}**`
+        : `${roll} + ${skillCheck.rawMod} (${skillCheck.skill}) = **${total}**`
 
     let resultMsg
-    if (isCrit)   resultMsg = `I rolled a Natural 20! Total: ${total} vs DC ${skillCheck.dc} — Critical Success!`
-    else if (isFumble) resultMsg = `I rolled a Natural 1. Total: ${total} vs DC ${skillCheck.dc} — Critical Failure!`
-    else if (success) resultMsg = `I rolled ${roll} + ${skillCheck.statMod} = ${total}. That's ${total - skillCheck.dc} above DC ${skillCheck.dc} — Success!`
-    else          resultMsg = `I rolled ${roll} + ${skillCheck.statMod} = ${total}. That's ${skillCheck.dc - total} below DC ${skillCheck.dc} — Failure.`
+    if (isCrit)    resultMsg = `Natural 20! ${bonusBreakdown} vs DC ${skillCheck.dc} — Critical Success!`
+    else if (isFumble) resultMsg = `Natural 1. ${bonusBreakdown} vs DC ${skillCheck.dc} — Critical Failure!`
+    else if (success)  resultMsg = `${bonusBreakdown} vs DC ${skillCheck.dc} — Success! (by ${total - skillCheck.dc})`
+    else               resultMsg = `${bonusBreakdown} vs DC ${skillCheck.dc} — Failure. (by ${skillCheck.dc - total})`
 
     setSkillCheck(null)
     await send(resultMsg)
@@ -415,7 +535,20 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     if (playerHP !== undefined) updates.current_hp = Math.max(1, playerHP)
 
     if (xpGained) {
-      updates.experience = (character.experience || 0) + xpGained
+      const newXP    = (character.experience || 0) + xpGained
+      const newLevel = levelFromXP(newXP)
+      updates.experience = newXP
+      // Check level-up — fires immediately if XP crosses a threshold
+      if (newLevel > (character.level || 1)) {
+        updates.level             = newLevel
+        updates.proficiency_bonus = proficiencyBonus(newLevel)
+        updates.xp_to_next_level  = xpToNextLevel(newLevel)
+        const conMod = Math.floor(((character.constitution || 10) - 10) / 2)
+        updates.max_hp     = (character.max_hp || 10) + Math.floor((HIT_DICE[character.class] || 8) / 2) + 1 + conMod
+        updates.current_hp = Math.min((character.current_hp || 1) + Math.floor((HIT_DICE[character.class] || 8) / 2) + 1 + conMod, updates.max_hp)
+        const newSlots = buildInitialSlots(character.class, newLevel)
+        if (Object.keys(newSlots).length > 0) updates.spell_slots = newSlots
+      }
     }
 
     // Apply loot
@@ -433,15 +566,19 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       await updateCharacterStats(updates)
     }
 
-    // Show toast notifications
+    // Show toast + open level-up modal if level increased
+    const newLevelAfterXP = xpGained ? levelFromXP((character.experience || 0) + xpGained) : character.level
+    const didLevelUp      = newLevelAfterXP > (character.level || 1)
     const eventPayload = {
-      xpGain: xpGained || null,
+      xpGain:     xpGained || null,
       goldChange: loot?.totalGold || null,
-      newItems: loot?.items || [],
+      newItems:   loot?.items || [],
+      levelUp:    didLevelUp ? newLevelAfterXP : null,
       removeItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[],
-      levelUp:null, hpChange:null, newConditions:[], removedConditions:[]
+      hpChange:null, newConditions:[], removedConditions:[]
     }
     showGameEvent(eventPayload)
+    if (didLevelUp) setLevelUpData({ newLevel: newLevelAfterXP })
     // Strip combat markers from narrative so they don't re-trigger the combat screen
     const cleanNarrative = (narrative || '')
       .replace(/⚔️ COMBAT BEGINS/gi, '')
@@ -461,6 +598,13 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
         : `I was knocked unconscious and defeated. ${cleanNarrative} What happens next?`
 
     await send(outcome)
+
+    // Prompt short rest after a victory if HP is meaningfully low
+    const currentHP = updates.current_hp ?? character.current_hp ?? character.max_hp
+    const hpPct     = currentHP / (character.max_hp || 10)
+    if (victory && hpPct < 0.75) {
+      setTimeout(() => setShowRest(true), 1200)
+    }
   }
 
   async function sendOpeningMessage() {
@@ -475,11 +619,152 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     finally { setSending(false) }
   }
 
+  // ── Apply slash command state changes ──────────────────────
+  async function applySlashStateChanges(changes) {
+    if (!changes || !Object.keys(changes).length) return
+
+    // Items
+    if (changes.addItems?.length) {
+      const existing = character.equipment || []
+      await updateCharacterStats({ equipment: [...existing, ...changes.addItems] })
+      showGameEvent({ newItems: changes.addItems, removeItems:[], newSpells:[], newNPCs:[], newQuests:[], questComplete:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    }
+    if (changes.removeItem) {
+      const eq  = character.equipment || []
+      const idx = eq.findIndex(e => e.toLowerCase().includes(changes.removeItem.toLowerCase()))
+      if (idx !== -1) await updateCharacterStats({ equipment: [...eq.slice(0,idx), ...eq.slice(idx+1)] })
+    }
+
+    // Equip
+    if (changes.equipItem) {
+      const { slot, itemName } = changes.equipItem
+      const { calculateAC, getEquipStatUpdates } = await import('../lib/items').catch(() => ({}))
+      const equipped = { ...(character.equipped || {}), [slot]: itemName }
+      const newAC    = calculateAC?.(equipped, { dexterity: character.dexterity, constitution: character.constitution, wisdom: character.wisdom, class: character.class }) ?? character.armor_class
+      const statUpds = getEquipStatUpdates ? (await import('../lib/items').then(m => m.getEquipStatUpdates(getItem(itemName), character)).catch(() => ({}))) : {}
+      await updateCharacterStats({ equipped, armor_class: newAC, ...statUpds })
+    }
+
+    // Gold
+    if (changes.setGold !== undefined) {
+      await updateCharacterStats({ gold: changes.setGold })
+    }
+
+    // HP
+    if (changes.setHP !== undefined) {
+      await updateCharacterStats({ current_hp: changes.setHP })
+    }
+
+    // Spell
+    if (changes.addSpell) {
+      const existing = character.spells || []
+      await updateCharacterStats({ spells: [...new Set([...existing, changes.addSpell])] })
+      showGameEvent({ newSpells: [changes.addSpell], newItems:[], removeItems:[], newNPCs:[], newQuests:[], questComplete:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    }
+
+    // Conditions
+    if (changes.addCondition) {
+      const conds = [...new Set([...(character.conditions||[]), changes.addCondition])]
+      await updateCharacterStats({ conditions: conds })
+    }
+    if (changes.removeCondition) {
+      const conds = (character.conditions||[]).filter(c => c !== changes.removeCondition)
+      await updateCharacterStats({ conditions: conds })
+    }
+
+    // Inspiration
+    if (changes.grantInspiration) {
+      setHasInspiration(true)
+    }
+
+    // Combat
+    if (changes.startCombat && changes.combatEnemies?.length) {
+      setCombatEnemies(changes.combatEnemies)
+      setInCombat(true)
+      saveCombatState(true, changes.combatEnemies.map(n => ({ name: n })))
+    }
+    if (changes.endCombat) {
+      setInCombat(false)
+      setCombatEnemies([])
+      saveCombatState(false, [])
+    }
+
+    // Rest
+    if (changes.triggerRest) {
+      setShowRest(true)
+    }
+
+    // Level up
+    if (changes.triggerLevelUp) {
+      setLevelUpData({ newLevel: changes.triggerLevelUp })
+    }
+
+    // Spell slots
+    if (changes.restoreSlots) {
+      if (changes.restoreSlots === 'all') {
+        const slots = { ...character.spell_slots }
+        for (const lvl of Object.keys(slots)) slots[lvl] = { ...slots[lvl], used: 0 }
+        await updateCharacterStats({ spell_slots: slots })
+      } else {
+        restoreSpellSlot(String(changes.restoreSlots))
+      }
+    }
+    if (changes.useSlot) {
+      spendSpellSlot(String(changes.useSlot))
+    }
+
+    // NPCs
+    if (changes.addNPC) {
+      showGameEvent({ newNPCs: [changes.addNPC], newItems:[], removeItems:[], newSpells:[], newQuests:[], questComplete:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    }
+
+    // Quests
+    if (changes.addQuest) {
+      showGameEvent({ newQuests: [changes.addQuest], newItems:[], removeItems:[], newNPCs:[], newSpells:[], questComplete:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    }
+    if (changes.completeQuest) {
+      showGameEvent({ questComplete: [changes.completeQuest], newItems:[], removeItems:[], newNPCs:[], newSpells:[], newQuests:[], goldChange:null, levelUp:null, hpChange:null, xpGain:null, newConditions:[], removedConditions:[] })
+    }
+  }
+
   async function send(overrideText) {
-    const content = (overrideText || input).trim()
-    if (!content || sending) return
+    const raw = (overrideText || input).trim()
+    if (!raw || sending) return
+
+    // Sanitize: strip control characters, limit length, prevent prompt injection
+    const content = raw
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')  // control chars
+      .replace(/\[SYSTEM\]|\[INST\]|<\|system\|>|<\|user\|>/gi, '')  // injection patterns
+      .slice(0, 2000)  // hard cap
+
+    if (!content) return
     setInput('')
     setError(null)
+
+    // ── Slash command intercept ─────────────────────────────
+    if (parseSlashCommand(content)) {
+      const slashResult = await executeSlashCommand(content, {
+        character, inCombat, hasInspiration, messages, campaignId,
+      })
+      if (slashResult.handled) {
+        // Show feedback as a system message in the chat
+        if (slashResult.feedback) {
+          await saveMessage('assistant', `\`\`\`
+${slashResult.feedback}
+\`\`\``)
+        }
+        // Apply all state changes immediately
+        await applySlashStateChanges(slashResult.stateChanges || {})
+        // If skipDM, stop here — don't call the LLM
+        if (slashResult.skipDM) return
+        // If sendToDM, override the text that goes to the DM
+        if (slashResult.sendToDM) {
+          await send(slashResult.sendToDM)
+          return
+        }
+        return
+      }
+    }
 
     // Detect rest request
     if (/\b(long rest|short rest|make camp|take a rest|i rest|we rest)\b/i.test(content)) {
@@ -527,12 +812,113 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       await saveMessage('user', content)
       const ragContext = await getRAGContext(content)
       const history    = [...messages, { role: 'user', content }]
-      const reply      = await callDM({ messages: history, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters, storyArcs })
-      const clean      = cleanDMText(reply)
+
+      // Detect which focused prompt mode to use for this action
+      const lastDMMsg = [...messages].reverse().find(m => m.role === 'assistant')?.content || ''
+      const { mode: promptMode, npc: npcTarget } = detectPromptMode({
+        playerAction: content, inCombat, lastDMMessage: lastDMMsg, npcs,
+      })
+      const skillCtx = promptMode === 'skill_check' && lastDMMsg.includes('🎲')
+        ? lastDMMsg.slice(lastDMMsg.indexOf('🎲'), lastDMMsg.indexOf('🎲') + 220)
+        : null
+
+      // ── Action pipeline: validate → resolve → get mechanical context ──
+      // For combat actions or structured commands, engine resolves BEFORE LLM narrates
+      let mechanicalContext = null
+      let customContentBlock = null
+      try {
+        customContentBlock = buildContentContextBlock(campaignId) || null
+      } catch {}
+
+      if (inCombat && !['narrative','npc_dialogue','skill_check'].includes(promptMode)) {
+        try {
+          // Classify what the player is trying to do
+          const actionType = classifyPlayerAction(content)
+          if (actionType !== ACTION_TYPES.NARRATIVE) {
+            const action = { type: actionType, payload: { rawText: content } }
+            const validation = validateAction(action, character, {})
+            if (!validation.valid) {
+              // Invalid action — tell the DM what was wrong, skip resolution
+              mechanicalContext = `[ACTION INVALID: ${validation.errors.join('; ')} — narrate why the character cannot do this.]`
+            } else {
+              const pipelineResult = await resolveAction(action, character, null, campaignId)
+              mechanicalContext = buildMechanicalContext(pipelineResult)
+            }
+          }
+        } catch (pErr) {
+          console.warn('[Pipeline] Resolution failed:', pErr.message)
+        }
+      }
+
+      const reply = await callDM({
+        messages: history, character, memory, ragContext, npcs, quests,
+        campaignSettings: campaignData, monsterContext, suggestedMonsters, storyArcs,
+        inCombat, promptMode, npcTarget,
+        checkContext: skillCtx,
+        rollResult: promptMode === 'skill_check' ? content : null,
+        mechanicalContext,
+        customContentBlock,
+      })
+      const clean = cleanDMText(reply)
       await saveMessage('assistant', clean)
       const { events } = await processDMReply(reply, content)
+
+      // Detect DM granting inspiration
+      if (/you gain inspiration|granting you inspiration|you have inspiration|inspiration for/i.test(reply)) {
+        setHasInspiration(true)
+        showGameEvent({ ambientDetail: '✨ You gained Inspiration! Spend it to reroll any d20.' })
+      }
+
+      // Auto-switch ambient sound based on location header in DM reply
+      const locMatch = clean.match(/📍\s*([^|\n]+)/i)
+      if (locMatch) {
+        const loc = locMatch[1].toLowerCase()
+        const detectedScene =
+          /tavern|inn|bar|alehouse|pub|feast|hall/i.test(loc) ? 'tavern'
+          : /forest|wood|grove|jungle|swamp|marsh|wild/i.test(loc) ? 'forest'
+          : /dungeon|cave|cavern|crypt|tomb|ruin|underground|sewer|mine/i.test(loc) ? 'dungeon'
+          : /city|town|village|street|market|castle|keep|temple|shrine/i.test(loc) ? 'tavern'
+          : null
+        if (detectedScene) setAutoScene(detectedScene)
+      }
+      if (events.combatStarted) setAutoScene('combat')
+      if (events.combatEnded)   setAutoScene('dungeon')
+
+      // Client-side combat trigger: catches cases where the DM narrated a fight
+      // without writing COMBAT BEGINS — the main bug this patch fixes.
+      if (!inCombat && shouldTriggerCombat(content, reply) && !reply.includes('COMBAT BEGINS')) {
+        const patch = clean + '\n ⚔️ COMBAT BEGINS \n Initiative Order: \n  - Enemy (HP: ?/?): ? \n - '
+          + (character?.name || 'Hero') + ' (HP: '
+          + (character?.current_hp || 10) + '/' + (character?.max_hp || 10) + '): ?'
+        await saveMessage('assistant', patch).catch(() => {})
+      }
       showGameEvent(events)
       if (events.levelUp) setLevelUpData({ newLevel: events.levelUp })
+
+      // Auto-compile any new spells that aren't in PLAYER_SPELLS or Open5e
+      // We pass the DM reply as the description source so the compiler has context
+      if (events.newSpells?.length) {
+        events.newSpells.forEach(async (spellName) => {
+          const clean = spellName.replace(/\s*\(cantrip\)/i, '').trim()
+          const cached = await loadCompiledSpell(clean, campaignId)
+          if (cached) return // already compiled
+          // Extract spell description from the DM reply if it's there
+          const descMatch = reply.match(new RegExp(`${clean.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}[^.]*\.([\s\S]{20,400})`, 'i'))
+          const desc = descMatch?.[1]?.trim() || reply.slice(0, 600)
+          compileSpell({ name: clean, description: desc, campaignId, character })
+            .then(compiled => {
+              if (compiled) console.log(`[SpellCompiler] Pre-compiled "${clean}" from DM reply`)
+            })
+            .catch(() => {})
+        })
+      }
+
+      // Ambient world detail every 6 narrative turns — fire-and-forget
+      if (!inCombat && promptMode === 'narrative' && messages.length % 6 === 0) {
+        callAmbientDetail({ character, memory, storyArcs, campaignSettings: campaignData })
+          .then(detail => { if (detail) console.log('[Ambient]', detail) })
+          .catch(() => {})
+      }
 
       // Update story arc powers every 8 messages (not every 3) to save API quota
       const msgCount = messages.length
@@ -574,13 +960,18 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
       const filteredHistory = messages.slice(0, -1)
       const lastUserMsg     = filteredHistory.filter(m => m.role === 'user').slice(-1)[0]?.content || ''
       const ragContext      = await getRAGContext(lastUserMsg)
-      const reply  = await callDM({ messages: filteredHistory, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters, storyArcs })
+      const reply  = await callDM({ messages: filteredHistory, character, memory, ragContext, npcs, quests, campaignSettings: campaignData, monsterContext, suggestedMonsters, storyArcs, inCombat })
       const clean  = cleanDMText(reply)
       await saveMessage('assistant', clean)
       const { events } = await processDMReply(reply, lastUserMsg)
       showGameEvent(events)
     } catch (err) { setError(err.message) }
     finally { setSending(false) }
+  }
+
+  async function handlePrepareSpells(spells) {
+    await updateCharacterStats({ spells })
+    setShowPrepSpells(false)
   }
 
   async function handleRest(type, updates) {
@@ -602,6 +993,19 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
     await updateCharacterStats({ conditions: current.filter(c => c !== condition) })
   }
 
+  async function handleExhaustionChange(level) {
+    const updates = { exhaustion_level: level }
+    // Level 4: halve max HP. Dropping below 4: restore it
+    const prev = character.exhaustion_level || 0
+    if (level >= 4 && prev < 4) {
+      updates.max_hp     = Math.floor((character.max_hp || 10) / 2)
+      updates.current_hp = Math.min(character.current_hp || 10, updates.max_hp)
+    } else if (level < 4 && prev >= 4) {
+      updates.max_hp = (character.max_hp || 10) * 2
+    }
+    await updateCharacterStats(updates)
+  }
+
   function speak(text, msgId) {
     if (!window.speechSynthesis) return
     window.speechSynthesis.cancel()
@@ -618,12 +1022,37 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
   }
 
   function handleRollResult(result) {
-    setInput(prev => { const b = prev.trim(); return b ? `${b}\n${result.summary}` : result.summary })
+    // If there's a pending skill check, auto-submit the roll
+    if (skillCheck) {
+      handleSkillCheckResult(result.rolls?.[0] || result.total)
+      return
+    }
+    // Otherwise append to input — player can review before sending
+    setInput(prev => { const b = prev.trim(); return b ? `${b} ${result.summary}` : result.summary })
     inputRef.current?.focus()
+  }
+
+  // Classify a player's free-text action into a pipeline action type
+  function classifyPlayerAction(text) {
+    const t = text.toLowerCase()
+    if (/^i cast|^cast |^using.*spell|^fire bolt|^magic missile/i.test(t)) return ACTION_TYPES.CAST_SPELL
+    if (/^i attack|^attack|^i strike|^i hit|^i swing|^i slash|^i stab/i.test(t)) return ACTION_TYPES.ATTACK
+    if (/^i drink|^i use.*potion|^use.*healing|^drink.*potion/i.test(t)) return ACTION_TYPES.USE_ITEM
+    if (/^i dash|^dash/i.test(t))      return ACTION_TYPES.DASH
+    if (/^i dodge|^dodge/i.test(t))    return ACTION_TYPES.DODGE
+    if (/^i hide|^hide/i.test(t))      return ACTION_TYPES.HIDE
+    if (/^i disengage|^disengage/i.test(t)) return ACTION_TYPES.DISENGAGE
+    return ACTION_TYPES.NARRATIVE
   }
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+    if (e.key === 'Escape') setSlashHints([])
+    if (e.key === 'Tab' && slashHints.length > 0) {
+      e.preventDefault()
+      setInput(slashHints[0].aliases[0] + ' ')
+      setSlashHints([])
+    }
   }
 
   function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 160) + 'px' }
@@ -673,6 +1102,23 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
         <LevelUpModal character={character} newLevel={levelUpData.newLevel}
           onSave={async (u) => { await updateCharacterStats(u); setLevelUpData(null) }}
           onClose={() => setLevelUpData(null)} />
+      )}
+      {showPrepSpells && character && ['Cleric','Druid','Paladin','Wizard'].includes(character.class) && (
+        <PreparedSpellsModal
+          character={character}
+          onSave={handlePrepareSpells}
+          onClose={() => setShowPrepSpells(false)}
+        />
+      )}
+      {showPrepSpells && character && ['Cleric','Druid','Paladin','Wizard'].includes(character.class) && (
+        <PreparedSpellsModal character={character} onSave={handlePrepareSpells} onClose={() => setShowPrepSpells(false)} />
+      )}
+      {showContentCreator && campaignId && (
+        <ContentCreator
+          campaignId={campaignId}
+          onClose={() => setShowContentCreator(false)}
+          onCreated={() => { setShowContentCreator(false) }}
+        />
       )}
       {showRest && character && (
         <RestModal character={character} onRest={handleRest} onClose={() => setShowRest(false)} />
@@ -762,15 +1208,30 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
             {character.avatar && <span style={{fontSize:'1.1rem'}}>{character.avatar}</span>}
             <span style={{ color: hpColor }}>HP {character.current_hp}/{character.max_hp}</span>
             <span className="game-sep">·</span>
-            <span className="game-gold">⚙ {character.gold ?? 10} gp</span>
+            <span className="game-gold">⚙ {formatCurrencyShort(character.gold ?? 10)}</span>
             {activeConditions.length > 0 && (
               <><span className="game-sep">·</span>
-              <span className="game-conditions">⚠ {activeConditions.join(', ')}</span></>
+              {hasInspiration && (
+            <button
+              className="game-sidebar-btn"
+              style={{color:'#f0c040',borderColor:'rgba(240,192,64,.4)',background:'rgba(240,192,64,.1)',animation:'inspirePulse 2s ease-in-out infinite'}}
+              onClick={() => {
+                setHasInspiration(false)
+                // Insert reroll token into chat input
+                setInput(prev => (prev + ' [INSPIRATION REROLL]').trim())
+                updateCharacterStats({ inspiration: false })
+              }}
+              title="Spend inspiration to reroll one d20"
+            >
+              ✨ Inspiration
+            </button>
+          )}
+          <span className="game-conditions">⚠ {activeConditions.join(', ')}</span></>
             )}
           </div>
         )}
         <div className="game-topbar-actions">
-          <AmbientSound />
+          <AmbientSound autoScene={autoScene} />
           <button className="game-sidebar-btn" onClick={() => setShowInventory(true)}>🎒 Items</button>
 
           <button className="game-sidebar-btn" onClick={() => setShowArmor(true)}>🛡️ Armor</button>
@@ -789,12 +1250,18 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
             </button>
           )}
           <button className="game-sidebar-btn" onClick={() => setShowRest(true)}>😴</button>
+          <button className="game-sidebar-btn" title="Create custom content" onClick={() => setShowContentCreator(true)}>⚙️ Create</button>
+          {['Cleric','Druid','Paladin','Wizard'].includes(character?.class) && (
+            <button className="game-sidebar-btn" title="Prepare spells" onClick={() => setShowPrepSpells(true)}>📖 Prep</button>
+          )}
           <button className="game-sidebar-btn" onClick={() => setShowSummary(true)}>📖</button>
           <button className="game-sidebar-btn" onClick={() => setShowSettings(true)}>⚙️</button>
-          {['dice','sheet','quests','npcs','notes'].map(panel => (
+          {['dice','sheet','quests','npcs','notes','spells','log'].map(panel => (
             <button key={panel} className={`game-sidebar-btn ${sidebar === panel ? 'active' : ''}`} onClick={() => toggleSidebar(panel)}>
               {panel === 'dice'  && '🎲 Dice'}
               {panel === 'sheet' && '📋 Sheet'}
+              {panel === 'spells' && '✨ Spells'}
+              {panel === 'log'    && '📜 Log'}
               {panel === 'quests'&& `📜${activeQuests.length ? ` (${activeQuests.length})` : ''}`}
               {panel === 'npcs'  && `👥${npcs.length ? ` (${npcs.length})` : ''}`}
               {panel === 'notes' && '📝'}
@@ -855,7 +1322,14 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
                 </div>
               </div>
             )}
-            {error && <div className="game-error"><strong>Error:</strong> {error}</div>}
+            {campaignError && (
+              <div className="game-error">⚠ {campaignError}</div>
+            )}
+            {(error) && (
+              <div className="game-error" onClick={() => setError(null)} title="Click to dismiss">
+                ⚠ {error}
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
 
@@ -868,9 +1342,47 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
             </div><SuggestedActions lastDMMessage={lastDMMessage} characterName={character?.name} onSelect={send} disabled={sending} enabled={suggestionsEnabled} /></>
           )}
 
-          <div className="game-input-area">
+          <div className="game-input-area" style={{position:'relative'}}>
+            {/* Slash command autocomplete */}
+            {slashHints.length > 0 && (
+              <div style={{
+                position:'absolute',bottom:'calc(100% + 6px)',left:0,right:0,
+                background:'var(--surface-1,#1f1200)',border:'1px solid rgba(200,146,42,.3)',
+                borderRadius:'8px',overflow:'hidden',zIndex:100,boxShadow:'0 -4px 16px rgba(0,0,0,.5)'
+              }}>
+                {slashHints.map(cmd => (
+                  <button key={cmd.id}
+                    onMouseDown={e => { e.preventDefault(); setInput(cmd.aliases[0] + ' '); setSlashHints([]); inputRef.current?.focus() }}
+                    style={{
+                      display:'flex',alignItems:'baseline',gap:'8px',width:'100%',padding:'7px 12px',
+                      background:'none',border:'none',borderBottom:'1px solid rgba(255,255,255,.06)',
+                      cursor:'pointer',textAlign:'left',
+                    }}>
+                    <span style={{color:'var(--gold,#c8922a)',fontFamily:'monospace',fontSize:'.72rem',minWidth:'180px',flexShrink:0}}>{cmd.aliases[0]}</span>
+                    <span style={{color:'var(--parch3,#aaa)',fontSize:'.66rem'}}>{cmd.description}</span>
+                  </button>
+                ))}
+                <div style={{padding:'4px 12px',fontSize:'.58rem',color:'rgba(255,255,255,.3)'}}>
+                  Tab to complete · Esc to dismiss
+                </div>
+              </div>
+            )}
             <textarea ref={inputRef} className="game-input" value={input}
-              onChange={e => { setInput(e.target.value); autoResize(e.target) }}
+              onChange={e => {
+                setInput(e.target.value)
+                autoResize(e.target)
+                // Show slash command hints when typing /
+                if (e.target.value.startsWith('/')) {
+                  const q = e.target.value.toLowerCase()
+                  const hits = COMMAND_REGISTRY.filter(c =>
+                    c.aliases.some(a => a.toLowerCase().startsWith(q)) ||
+                    c.id.startsWith(q.slice(1))
+                  ).slice(0, 6)
+                  setSlashHints(hits)
+                } else {
+                  setSlashHints([])
+                }
+              }}
               onKeyDown={handleKeyDown}
               placeholder={character ? `What does ${character.name} do?` : 'What do you do?'}
               rows={1} disabled={sending} />
@@ -886,7 +1398,9 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
         {sidebar && (
           <div className="game-sidebar">
             {sidebar === 'dice'  && <DiceRoller onRollResult={handleRollResult} />}
-            {sidebar === 'notes' && <NotesPanel campaignId={campaignId} userId={userId} />}
+            {sidebar === 'notes'   && <NotesPanel campaignId={campaignId} userId={userId} />}
+            {sidebar === 'log'    && <AdventureLog campaignId={campaignId} messages={messages} character={character} />}
+            {sidebar === 'spells' && character && <SpellbookPanel character={character} campaignId={campaignId} />}
 
             {sidebar === 'sheet' && character && (
               <div className="sheet-panel">
@@ -920,13 +1434,26 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
                         {character.current_hp} / {character.max_hp} HP
                       </span>
                     )}
-                    <span className="sheet-ac-val">AC {character.armor_class} · +{character.proficiency_bonus||2}</span>
+                    <span className="sheet-ac-val">AC {character.armor_class} · Prof +{character.proficiency_bonus||2} · PP {getPassivePerception(character)}</span>
                   </div>
                 </div>
 
                 <div className="sheet-section">
                   <div className="sheet-section-title">Gold</div>
-                  <div className="sheet-gold">⚙ {character.gold??10} gp</div>
+                  <div className="sheet-gold">
+                    {(() => {
+                      const c = migrateToCurrency(character.gold ?? 10)
+                      return (
+                        <div style={{display:'flex',gap:'8px',flexWrap:'wrap',fontSize:'.78rem'}}>
+                          {c.pp > 0 && <span style={{color:'#c8c8ff'}}>⬜ {c.pp} pp</span>}
+                          {c.gp > 0 && <span style={{color:'var(--gold,#c8922a)'}}>🟡 {c.gp} gp</span>}
+                          {c.sp > 0 && <span style={{color:'#c0c0c0'}}>⚪ {c.sp} sp</span>}
+                          {c.cp > 0 && <span style={{color:'#b87333'}}>🟤 {c.cp} cp</span>}
+                          {(c.pp+c.gp+c.sp+c.cp === 0) && <span>0 gp</span>}
+                        </div>
+                      )
+                    })()}
+                  </div>
                 </div>
 
                 <div className="sheet-section">
@@ -960,6 +1487,30 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
                   <div className="sheet-section">
                     <div className="sheet-section-title">Spell Slots</div>
                     <SpellSlotTracker spellSlots={character.spell_slots} onUseSlot={spendSpellSlot} onRestoreSlot={restoreSpellSlot} />
+                  </div>
+                )}
+
+                {/* Skill list */}
+                <div className="sheet-section">
+                  <div className="sheet-section-title">Skills</div>
+                  {[['Acrobatics','DEX'],['Animal Handling','WIS'],['Arcana','INT'],['Athletics','STR'],['Deception','CHA'],['History','INT'],['Insight','WIS'],['Intimidation','CHA'],['Investigation','INT'],['Medicine','WIS'],['Nature','INT'],['Perception','WIS'],['Performance','CHA'],['Persuasion','CHA'],['Religion','INT'],['Sleight of Hand','DEX'],['Stealth','DEX'],['Survival','WIS']].map(([skill, stat]) => {
+                    const bonus   = getSkillBonus(character, skill)
+                    const isProficient = (character.skill_proficiencies || []).some(s => s.toLowerCase() === skill.toLowerCase())
+                    const isExpert     = (character.expertise_skills || []).some(s => s.toLowerCase() === skill.toLowerCase())
+                    const bonusStr = bonus >= 0 ? `+${bonus}` : `${bonus}`
+                    return (
+                      <div key={skill} style={{display:'flex',justifyContent:'space-between',fontSize:'.66rem',padding:'1px 0',color:isProficient?'var(--parch,#e8dcc0)':'var(--parch3,#aaa)'}}>
+                        <span>{isExpert?'◆ ':isProficient?'● ':'○ '}{skill} <span style={{opacity:.5,fontSize:'.58rem'}}>({stat})</span></span>
+                        <span style={{fontFamily:'var(--font-mono)',color:isExpert?'#f0c040':isProficient?'var(--gold,#c8922a)':'inherit'}}>{bonusStr}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {character.feats?.length > 0 && (
+                  <div className="sheet-section">
+                    <div className="sheet-section-title">Feats</div>
+                    {character.feats.map((f,i) => <div key={i} className="sheet-item">⭐ {f}</div>)}
                   </div>
                 )}
 
@@ -1041,28 +1592,18 @@ export default function GamePage({ campaignId, userId, campaign, onBack, onCampa
             )}
 
             {sidebar === 'npcs' && (
-              <div className="npcs-panel">
-                <div className="panel-title">👥 Known NPCs</div>
-                {npcs.length === 0 && <div className="panel-empty">No NPCs encountered yet.</div>}
-                {['ally','neutral','foe'].map(role => {
-                  const filtered = npcs.filter(n => n.role === role)
-                  if (!filtered.length) return null
-                  return (
-                    <div key={role}>
-                      <div className={`npc-role-label npc-role-${role}`}>
-                        {role==='ally'?'💚 Allies':role==='foe'?'❤️ Foes':'⬜ Neutral'}
-                      </div>
-                      {filtered.map(n => (
-                        <div key={n.id} className={`npc-card npc-${n.role}`}>
-                          <div className="npc-name">{n.name}</div>
-                          {n.location    && <div className="npc-location">📍 {n.location}</div>}
-                          {n.description && <div className="npc-desc">{n.description}</div>}
-                        </div>
-                      ))}
-                    </div>
-                  )
-                })}
-              </div>
+              <NPCPanel
+                npcs={npcs}
+                onUpdateNPC={async (id, updates) => {
+                  await supabase.from('npcs').update(updates).eq('id', id)
+                  // Refresh npcs from DB would require useCampaign exposure; for now optimistic update
+                }}
+                onTalkTo={(npcName) => {
+                  setInput(`I speak with ${npcName}.`)
+                  setSidebar(null)
+                  setTimeout(() => inputRef.current?.focus(), 50)
+                }}
+              />
             )}
           </div>
         )}

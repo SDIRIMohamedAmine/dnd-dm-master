@@ -58,12 +58,23 @@ export function useKnowledgeBase() {
       const existingIds = new Set(prev.map(c => c.id));
       const merged      = [...prev, ...newChunks.filter(c => !existingIds.has(c.id))];
 
-      // Save to localStorage — next app load restores instantly
-      const saved = saveChunksToStorage(merged);
+      // NOTE: localStorage is capped at ~5MB. For large SRD imports this
+      // cache will fail silently. The Supabase knowledge_chunks table is the
+      // real source of truth — this cache only speeds up offline/fallback use.
+      let saved = false
+      try {
+        saved = saveChunksToStorage(merged)
+      } catch (e) {
+        console.warn('[KB] localStorage quota exceeded — data is in Supabase but not cached locally')
+      }
+
+      const cacheNote = saved
+        ? ' Cached locally for fast reloads.'
+        : ' Local cache full — data is still in Supabase and will be retrieved per-query.'
 
       setStatus({
         loading:  false,
-        message:  `Done! ${newChunks.length} chunks imported, ${merged.length} total.${!saved ? ' (Storage full — not persisted)' : ' Saved to localStorage.'}`,
+        message:  `Done! ${newChunks.length} chunks imported, ${merged.length} total.${cacheNote}`,
         progress: 100,
       });
 

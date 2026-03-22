@@ -5,7 +5,8 @@ import { useAuth } from '../lib/AuthContext'
 import './CampaignsPage.css'
 
 export default function CampaignsPage({ onSelect, onNew, onRAGSetup, onLibrary }) {
-  const { user, signOut } = useAuth()
+  const { user, signOut, deleteAccount } = useAuth()
+  const [deletingAccount, setDeletingAccount] = useState(false)
   const [campaigns, setCampaigns] = useState([])
   const [loading,   setLoading]   = useState(true)
 
@@ -26,6 +27,17 @@ export default function CampaignsPage({ onSelect, onNew, onRAGSetup, onLibrary }
     }
     load()
   }, [user.id])
+
+  async function handleDeleteAccount() {
+    if (!window.confirm('Delete your account and ALL campaigns permanently? This cannot be undone.')) return
+    setDeletingAccount(true)
+    try {
+      await deleteAccount()
+    } catch (err) {
+      alert('Failed to delete account: ' + err.message)
+      setDeletingAccount(false)
+    }
+  }
 
   async function deleteCampaign(e, id) {
     e.stopPropagation()
@@ -49,6 +61,13 @@ export default function CampaignsPage({ onSelect, onNew, onRAGSetup, onLibrary }
           <button className="btn-rag-setup" onClick={onRAGSetup}>⚙ Lore Setup</button>
           <button className="btn-rag-setup" onClick={onLibrary} style={{marginLeft:6}}>📖 SRD Library</button>
           <button className="btn-signout" onClick={signOut}>Sign out</button>
+          <button
+            className="btn-signout"
+            style={{background:'rgba(150,20,20,.15)',borderColor:'rgba(150,20,20,.4)',color:'#e08080',marginLeft:4}}
+            onClick={handleDeleteAccount}
+            disabled={deletingAccount}
+            title="Permanently delete your account and all data"
+          >{deletingAccount ? 'Deleting…' : '🗑 Delete Account'}</button>
         </div>
       </header>
 

@@ -1,4 +1,5 @@
 // src/combat/engine.js — Enhanced Combat Engine v2
+import ALL_SPELLS from './spellData'
 // Full D&D 5e combat: status effects, AoE, multi-target, enemy spells, self-targeting
 
 // ── Dice ────────────────────────────────────────────────────
@@ -207,6 +208,25 @@ export const MONSTER_STATS = {
     spells: [],
     tactics: 'Uses Pack Tactics when ally is adjacent.',
     flavor: ['snaps its jaws', 'circles low', 'lunges for the ankles'],
+    abilities: [
+      {
+        id: 'wolf_bite', name: 'Bite', icon: '🐺',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '2d4+2', damageType: 'piercing' },
+        resolution: { type: 'attack_roll', bonus: 4 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+        onHitEffect: { effect: { type: 'saving_throw', stat: 'STR', dc: 11,
+          onFail: { type: 'apply_status', statusId: 'prone', duration: 1 } } },
+      },
+      {
+        id: 'wolf_pack_tactics', name: 'Pack Tactics', icon: '🐺',
+        trigger: 'passive', condition: { allyNearby: true },
+        effect: { type: 'modify_stat', stat: 'attack_advantage', value: true },
+        targeting: { type: 'self' }, cost: { type: 'none' }, castAs: 'free',
+        description: 'Advantage on attacks when an ally is adjacent to target.',
+      },
+    ],
   },
   'Goblin': {
     name: 'Goblin', hp: 7, maxHp: 7, ac: 15, cr: '1/4', xp: 50,
@@ -218,6 +238,23 @@ export const MONSTER_STATS = {
     spells: [],
     tactics: 'Hides after attacking.',
     flavor: ['cackles', 'darts sideways', 'jabs then retreats'],
+    abilities: [
+      {
+        id: 'goblin_scimitar', name: 'Scimitar', icon: '⚔️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d6+2', damageType: 'slashing' },
+        resolution: { type: 'attack_roll', bonus: 4 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+      {
+        id: 'goblin_nimble_escape', name: 'Nimble Escape', icon: '💨',
+        trigger: 'on_turn_end', condition: {},
+        effect: { type: 'apply_status', statusId: 'shielded', duration: 1 },
+        targeting: { type: 'self' }, cost: { type: 'none' }, castAs: 'bonus',
+        description: 'Goblin hides after attacking.',
+      },
+    ],
   },
   'Skeleton': {
     name: 'Skeleton', hp: 13, maxHp: 13, ac: 13, cr: '1/4', xp: 50,
@@ -230,6 +267,25 @@ export const MONSTER_STATS = {
     spells: ['chill_touch'],
     tactics: 'No morale. Fights mechanically.',
     flavor: ['advances with hollow eye sockets', 'jaw clatters'],
+    abilities: [
+      {
+        id: 'skeleton_shortsword', name: 'Shortsword', icon: '⚔️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d6+2', damageType: 'piercing' },
+        resolution: { type: 'attack_roll', bonus: 4 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+      {
+        id: 'skeleton_chill_touch', name: 'Chill Touch', icon: '💀',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d8', damageType: 'necrotic' },
+        resolution: { type: 'attack_roll', bonus: 4 },
+        targeting: { type: 'single_enemy', range: 'ranged' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'action', cooldown: 2,
+        onHitEffect: { effect: { type: 'apply_status', statusId: 'weakened', duration: 1 } },
+      },
+    ],
   },
   'Zombie': {
     name: 'Zombie', hp: 22, maxHp: 22, ac: 8, cr: '1/4', xp: 50,
@@ -242,6 +298,18 @@ export const MONSTER_STATS = {
     spells: ['chill_touch'],
     tactics: 'Relentless. Never retreats.',
     flavor: ['lurches forward', 'groans and grasps'],
+    abilities: [
+      {
+        id: 'zombie_slam', name: 'Slam', icon: '👊',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d6+1', damageType: 'bludgeoning' },
+        resolution: { type: 'attack_roll', bonus: 3 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+        onHitEffect: { effect: { type: 'saving_throw', stat: 'CON', dc: 12,
+          onFail: { type: 'apply_status', statusId: 'poisonDot', duration: 2 } } },
+      },
+    ],
   },
   'Bandit': {
     name: 'Bandit', hp: 11, maxHp: 11, ac: 12, cr: '1/8', xp: 25,
@@ -253,6 +321,23 @@ export const MONSTER_STATS = {
     spells: [],
     tactics: 'Retreats if below 50% HP.',
     flavor: ['snarls a threat', 'spits on the ground'],
+    abilities: [
+      {
+        id: 'bandit_scimitar', name: 'Scimitar', icon: '⚔️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d6+1', damageType: 'slashing' },
+        resolution: { type: 'attack_roll', bonus: 3 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+      {
+        id: 'bandit_retreat', name: 'Tactical Retreat', icon: '🏃',
+        trigger: 'active', condition: { hpBelow: 0.5 },
+        effect: { type: 'apply_status', statusId: 'shielded', duration: 1 },
+        targeting: { type: 'self' }, cost: { type: 'none' }, castAs: 'bonus',
+        description: 'Disengage when below half HP.',
+      },
+    ],
   },
   'Orc': {
     name: 'Orc', hp: 15, maxHp: 15, ac: 13, cr: '1/2', xp: 100,
@@ -264,6 +349,24 @@ export const MONSTER_STATS = {
     spells: ['cause_fear'],
     tactics: 'Charges directly.',
     flavor: ['roars a battle cry', 'charges with reckless fury'],
+    abilities: [
+      {
+        id: 'orc_greataxe', name: 'Greataxe', icon: '🪓',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d12+3', damageType: 'slashing' },
+        resolution: { type: 'attack_roll', bonus: 5 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+      {
+        id: 'orc_cause_fear', name: 'Aggressive Roar', icon: '😱',
+        trigger: 'active', condition: {},
+        effect: { type: 'apply_status', statusId: 'frightened', duration: 2 },
+        resolution: { type: 'saving_throw', stat: 'WIS', dc: 12 },
+        targeting: { type: 'single_enemy', range: 'ranged' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'action', cooldown: 3,
+      },
+    ],
   },
   'Giant Rat': {
     name: 'Giant Rat', hp: 7, maxHp: 7, ac: 12, cr: '1/8', xp: 25,
@@ -276,6 +379,24 @@ export const MONSTER_STATS = {
     spells: [],
     tactics: 'Pack animal.',
     flavor: ['squeals and lunges', 'bares yellow teeth'],
+    abilities: [
+      {
+        id: 'rat_bite', name: 'Bite', icon: '🐀',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d4+2', damageType: 'piercing' },
+        resolution: { type: 'attack_roll', bonus: 4 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+        onHitEffect: { effect: { type: 'saving_throw', stat: 'CON', dc: 10,
+          onFail: { type: 'apply_status', statusId: 'poisonDot', duration: 3 } } },
+      },
+      {
+        id: 'rat_pack_tactics', name: 'Pack Tactics', icon: '🐀',
+        trigger: 'passive', condition: { allyNearby: true },
+        effect: { type: 'modify_stat', stat: 'attack_advantage', value: true },
+        targeting: { type: 'self' }, cost: { type: 'none' }, castAs: 'free',
+      },
+    ],
   },
   'Cultist': {
     name: 'Cultist', hp: 9, maxHp: 9, ac: 12, cr: '1/8', xp: 25,
@@ -287,6 +408,33 @@ export const MONSTER_STATS = {
     spells: ['poison_spray', 'cause_fear'],
     tactics: 'Fanatical. Uses spells when possible.',
     flavor: ['chants in a dark tongue', 'raises a ritual dagger'],
+    abilities: [
+      {
+        id: 'cultist_scimitar', name: 'Scimitar', icon: '⚔️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d6+1', damageType: 'slashing' },
+        resolution: { type: 'attack_roll', bonus: 3 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+      {
+        id: 'cultist_poison_spray', name: 'Poison Spray', icon: '☠️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d12', damageType: 'poison' },
+        resolution: { type: 'saving_throw', stat: 'CON', dc: 13 },
+        targeting: { type: 'single_enemy', range: 'ranged' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'action', cooldown: 2,
+        onHitEffect: { effect: { type: 'apply_status', statusId: 'poisoned', duration: 2 } },
+      },
+      {
+        id: 'cultist_cause_fear', name: 'Cause Fear', icon: '😱',
+        trigger: 'active', condition: { hpBelow: 0.6 },
+        effect: { type: 'apply_status', statusId: 'frightened', duration: 3 },
+        resolution: { type: 'saving_throw', stat: 'WIS', dc: 13 },
+        targeting: { type: 'single_enemy', range: 'ranged' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'action', cooldown: 3,
+      },
+    ],
   },
   'Mage': {
     name: 'Mage', hp: 40, maxHp: 40, ac: 12, cr: '6', xp: 2300,
@@ -298,6 +446,40 @@ export const MONSTER_STATS = {
     spells: ['ray_of_frost', 'burning_hands', 'mage_armor', 'poison_spray'],
     tactics: 'Casts spells preferentially. Uses mage_armor if below 50% HP.',
     flavor: ['gestures arcane symbols', 'incants in a dead language'],
+    abilities: [
+      {
+        id: 'mage_ray_of_frost', name: 'Ray of Frost', icon: '❄️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d8', damageType: 'cold' },
+        resolution: { type: 'attack_roll', bonus: 6 },
+        targeting: { type: 'single_enemy', range: 'ranged' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+        onHitEffect: { effect: { type: 'apply_status', statusId: 'frozen', duration: 1 } },
+      },
+      {
+        id: 'mage_burning_hands', name: 'Burning Hands', icon: '🔥',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '3d6', damageType: 'fire' },
+        resolution: { type: 'saving_throw', stat: 'DEX', dc: 14, halfOnSave: true },
+        targeting: { type: 'all_enemies', range: 'aoe' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'action', cooldown: 2,
+      },
+      {
+        id: 'mage_self_armor', name: 'Mage Armor', icon: '🛡️',
+        trigger: 'active', condition: { hpBelow: 0.5 },
+        effect: { type: 'apply_status', statusId: 'shielded', duration: 3 },
+        targeting: { type: 'self' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'action', cooldown: 3,
+      },
+      {
+        id: 'mage_dagger', name: 'Dagger', icon: '🗡️',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '1d4', damageType: 'piercing' },
+        resolution: { type: 'attack_roll', bonus: 4 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+    ],
   },
   'Vampire Spawn': {
     name: 'Vampire Spawn', hp: 82, maxHp: 82, ac: 15, cr: '5', xp: 1800,
@@ -311,6 +493,33 @@ export const MONSTER_STATS = {
     spells: ['chill_touch', 'cause_fear', 'healing_word'],
     tactics: 'Alternates bite and claws. Heals with healing_word when below 40% HP.',
     flavor: ['hisses revealing fangs', 'moves with unnatural grace'],
+    abilities: [
+      {
+        id: 'vampire_claws', name: 'Claws', icon: '🧛',
+        trigger: 'active', condition: {},
+        effect: { type: 'damage', dice: '2d4+4', damageType: 'slashing' },
+        resolution: { type: 'attack_roll', bonus: 6 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+        onHitEffect: { effect: { type: 'saving_throw', stat: 'STR', dc: 13,
+          onFail: { type: 'apply_status', statusId: 'frozen', duration: 1 } } },
+      },
+      {
+        id: 'vampire_bite', name: 'Bite', icon: '🦷',
+        trigger: 'active', condition: { hasStatus: 'frozen' }, // bites grappled targets
+        effect: { type: 'damage', dice: '1d6+4', damageType: 'piercing' },
+        resolution: { type: 'attack_roll', bonus: 6 },
+        targeting: { type: 'single_enemy', range: 'melee' },
+        cost: { type: 'none' }, castAs: 'action', cooldown: 0,
+      },
+      {
+        id: 'vampire_heal', name: 'Healing Word', icon: '💚',
+        trigger: 'active', condition: { hpBelow: 0.4 },
+        effect: { type: 'heal', healDice: '1d4+2' },
+        targeting: { type: 'self' },
+        cost: { type: 'charge', amount: 1 }, castAs: 'bonus', cooldown: 2,
+      },
+    ],
   },
 }
 
@@ -342,7 +551,8 @@ export function getMonsterStats(name) {
 
 // ── PLAYER SPELL DATABASE ─────────────────────────────────────
 // Full definitions: targeting, effects, dice
-export const PLAYER_SPELLS = {
+// Merge: ALL_SPELLS is the full database; overrides below take precedence for tuned entries
+const LEGACY_SPELLS = {
   // === CANTRIPS ===
   'Fire Bolt': {
     level: 0, school: 'evocation', icon: '🔥',
@@ -671,6 +881,9 @@ export const PLAYER_SPELLS = {
   },
 }
 
+// Merged spell dictionary — ALL_SPELLS (full SRD) + LEGACY_SPELLS overrides
+export const PLAYER_SPELLS = { ...ALL_SPELLS, ...LEGACY_SPELLS }
+
 // Get a spell definition (normalize name)
 export function getSpellDef(spellName) {
   const clean = spellName.replace(/\s*\(cantrip\)/i, '').trim()
@@ -707,13 +920,21 @@ export function resolveAttack({ attacker, target, attackBonus, damageDice, advan
 }
 
 // ── SAVING THROW ─────────────────────────────────────────────
+// creature may have saving_throw_proficiencies array and profBonus
 export function resolveSave({ creature, stat, dc }) {
   const statMap = { STR:'str', DEX:'dex', CON:'con', INT:'int', WIS:'wis', CHA:'cha' }
+  const statFull = { STR:'strength', DEX:'dexterity', CON:'constitution', INT:'intelligence', WIS:'wisdom', CHA:'charisma' }
   const score   = creature[statMap[stat] || 'str'] || 10
-  const mod     = abilityMod(score)
+  let   mod     = abilityMod(score)
+  // Add proficiency bonus if the creature/character is proficient in this save
+  const saveProfs = creature.saving_throw_proficiencies || creature.savingThrows || []
+  const statLong  = statFull[stat] || ''
+  const proficient = saveProfs.some(s => s.toLowerCase() === statLong.toLowerCase() || s.toLowerCase() === stat.toLowerCase())
+  const profBonus  = creature.profBonus || creature.proficiency_bonus || 0
+  if (proficient && profBonus) mod += profBonus
   const dieRoll = roll(20)
   const total   = dieRoll + mod
-  return { dieRoll, mod, total, dc, success: total >= dc, stat }
+  return { dieRoll, mod, total, dc, success: total >= dc, stat, proficient }
 }
 
 // ── COMBAT LOG ENTRY ─────────────────────────────────────────
@@ -732,6 +953,186 @@ const LOOT_TABLES = {
   'Giant Rat': { gold: [0,1],  items: ['Rat Fur', null, null] },
   'Cultist':   { gold: [1,6],  items: ['Cultist Dagger', 'Dark Symbol', null] },
   'Mage':      { gold: [5,20], items: ['Spellbook Fragment', 'Arcane Focus', 'Scroll of Magic Missile'] },
+}
+
+
+// ── WEAPON PROPERTIES ────────────────────────────────────────
+// finesse: use STR or DEX (whichever is higher)
+// versatile: 1d8 one-hand, 1d10 two-hand (two-hand assumed if no shield equipped)
+// thrown: can make ranged attack
+// heavy: small/tiny creatures have disadvantage
+// light: can dual-wield with another light weapon
+export const WEAPON_DATA = {
+  'Greatsword':   { damage:'2d6',  type:'slashing', heavy:true,  twoHanded:true  },
+  'Longsword':    { damage:'1d8',  type:'slashing', versatile:'1d10'             },
+  'Rapier':       { damage:'1d8',  type:'piercing', finesse:true                 },
+  'Shortsword':   { damage:'1d6',  type:'piercing', finesse:true, light:true     },
+  'Dagger':       { damage:'1d4',  type:'piercing', finesse:true, light:true, thrown:{normal:20,long:60} },
+  'Handaxe':      { damage:'1d6',  type:'slashing', light:true, thrown:{normal:20,long:60} },
+  'Battleaxe':    { damage:'1d8',  type:'slashing', versatile:'1d10'             },
+  'Greataxe':     { damage:'1d12', type:'slashing', heavy:true,  twoHanded:true  },
+  'Warhammer':    { damage:'1d8',  type:'bludgeoning', versatile:'1d10'          },
+  'Mace':         { damage:'1d6',  type:'bludgeoning'                            },
+  'Quarterstaff': { damage:'1d6',  type:'bludgeoning', versatile:'1d8'           },
+  'Flail':        { damage:'1d8',  type:'bludgeoning'                            },
+  'Maul':         { damage:'2d6',  type:'bludgeoning', heavy:true, twoHanded:true },
+  'Javelin':      { damage:'1d6',  type:'piercing', thrown:{normal:30,long:120}  },
+  'Spear':        { damage:'1d6',  type:'piercing', versatile:'1d8', thrown:{normal:20,long:60} },
+  'Shortbow':     { damage:'1d6',  type:'piercing', ranged:{normal:80,long:320}, twoHanded:true },
+  'Longbow':      { damage:'1d8',  type:'piercing', ranged:{normal:150,long:600}, heavy:true, twoHanded:true },
+  'Crossbow, light':{ damage:'1d8',  type:'piercing', ranged:{normal:80,long:320}, twoHanded:true },
+  'Hand Crossbow':  { damage:'1d6',  type:'piercing', ranged:{normal:30,long:120}, light:true  },
+  'Whip':         { damage:'1d4',  type:'slashing', finesse:true, reach:true     },
+  'Club':         { damage:'1d4',  type:'bludgeoning', light:true                },
+  'Greatclub':    { damage:'1d8',  type:'bludgeoning', twoHanded:true            },
+  'Sickle':       { damage:'1d4',  type:'slashing', light:true                  },
+  'Unarmed':      { damage:'1',    type:'bludgeoning'                            },
+}
+
+// Given equipment array and stats, return the best weapon info
+export function getEquippedWeapon(equipment, str, dex) {
+  const equip = (equipment || []).join(' ').toLowerCase()
+  // Find best matching weapon (longest match wins)
+  let best = null, bestLen = 0
+  for (const [name, data] of Object.entries(WEAPON_DATA)) {
+    if (name === 'Unarmed') continue
+    if (equip.includes(name.toLowerCase()) && name.length > bestLen) {
+      best = { name, ...data }
+      bestLen = name.length
+    }
+  }
+  if (!best) best = { name: 'Unarmed', ...WEAPON_DATA['Unarmed'] }
+
+  const strMod = abilityMod(str || 10)
+  const dexMod = abilityMod(dex || 10)
+
+  // Finesse: pick higher of STR or DEX
+  let statMod = strMod
+  let statUsed = 'STR'
+  if (best.finesse && dexMod > strMod) { statMod = dexMod; statUsed = 'DEX' }
+
+  // Ranged weapons always use DEX
+  if (best.ranged) { statMod = dexMod; statUsed = 'DEX' }
+
+  // Versatile: use bigger die if no shield in equipment
+  const hasShield = equip.includes('shield')
+  let damageDice = best.damage
+  if (best.versatile && !hasShield) damageDice = best.versatile
+
+  return { ...best, damageDice, statMod, statUsed }
+}
+
+
+// ── CLASS COMBAT FEATURES (mechanical) ──────────────────────
+export const CLASS_COMBAT_FEATURES = {
+  Barbarian: {
+    rage: {
+      id: 'rage', name: 'Rage', icon: '😡', charges: (level) => level >= 17 ? 6 : level >= 15 ? 5 : level >= 12 ? 4 : level >= 6 ? 3 : 2,
+      bonusDamage: 2,               // +2 to melee damage rolls while raging
+      resistance: ['bludgeoning','piercing','slashing'],  // resist physical while raging
+      advantageOn: ['strength'],    // advantage on STR checks and saves
+      description: '+2 damage, resistance to physical, advantage on STR. Lasts 10 rounds.',
+      duration: 10,
+      effectId: 'raging',
+    },
+    recklessAttack: {
+      id: 'recklessAttack', name: 'Reckless Attack', icon: '⚡', noCharge: true,
+      giveAdvantage: true,         // advantage on attack rolls this turn
+      giveEnemyAdvantage: true,    // enemies have advantage against you until next turn
+      description: 'Advantage on attacks this turn. Enemies have advantage against you.',
+    },
+  },
+  Fighter: {
+    secondWind: {
+      id: 'secondWind', name: 'Second Wind', icon: '💪', charges: 1, recharge: 'short',
+      healDice: (level) => `1d10+${level}`,
+      description: 'Heal 1d10 + Fighter level HP as a bonus action.',
+    },
+    actionSurge: {
+      id: 'actionSurge', name: 'Action Surge', icon: '⚡', charges: 1, recharge: 'short',
+      grantExtraAction: true,
+      description: 'Take one additional action this turn.',
+    },
+  },
+  Rogue: {
+    sneakAttack: {
+      id: 'sneakAttack', name: 'Sneak Attack', icon: '🗡️', noCharge: true, oncePer: 'turn',
+      extraDice: (level) => `${Math.ceil(level/2)}d6`,
+      condition: 'advantage or ally adjacent',   // checked programmatically
+      description: (level) => `+${Math.ceil(level/2)}d6 damage when you have advantage or an ally is adjacent to target.`,
+    },
+  },
+  Paladin: {
+    divineSmite: {
+      id: 'divineSmite', name: 'Divine Smite', icon: '✨', noCharge: true,
+      onHit: true,   // triggers after a hit is confirmed
+      damagePerSlot: (slot) => `${slot + 1}d8`,  // 2d8 at slot 1, 3d8 at slot 2, etc.
+      damageType: 'radiant',
+      extraVsUndead: '1d8',
+      description: 'After hitting: burn a spell slot. Deal (slot+1)d8 radiant (extra d8 vs undead/fiends).',
+    },
+    layOnHands: {
+      id: 'layOnHands', name: 'Lay on Hands', icon: '🤲',
+      pool: (level) => level * 5,   // total HP pool
+      description: (level) => `Heal up to ${level * 5} HP total, divided however you choose. Restore from HP pool.`,
+    },
+  },
+  Monk: {
+    martialArts: {
+      id: 'martialArts', name: 'Martial Arts', icon: '🥋', noCharge: true,
+      unarmedDice: (level) => level >= 17 ? '1d10' : level >= 11 ? '1d8' : level >= 5 ? '1d6' : '1d4',
+      finesseUnarmed: true,  // use DEX for unarmed
+      bonusUnarmed: true,    // bonus action unarmed strike after Attack action
+    },
+    stunningStrike: {
+      id: 'stunningStrike', name: 'Stunning Strike', icon: '💫', kiCost: 1,
+      onHit: true,
+      saveStat: 'CON', saveDC: (wis, prof) => 8 + prof + abilityMod(wis),
+      applyEffect: 'stunned', duration: 1,
+      description: 'After hitting: spend 1 Ki. Target CON save or stunned until end of your next turn.',
+    },
+  },
+  Ranger: {
+    huntersMark: {
+      id: 'huntersMark', name: "Hunter's Mark", icon: '🎯', noCharge: true,
+      extraDamage: '1d6', damageType: 'piercing',
+      concentration: true,
+      description: '+1d6 damage to marked target. Concentration.',
+    },
+  },
+  Bard: {
+    bardicInspiration: {
+      id: 'bardicInspiration', name: 'Bardic Inspiration', icon: '🎵',
+      charges: (cha) => Math.max(1, abilityMod(cha)),
+      die: (level) => level >= 15 ? '1d12' : level >= 10 ? '1d10' : level >= 5 ? '1d8' : '1d6',
+      description: (level) => `Give a d${level >= 15 ? 12 : level >= 10 ? 10 : level >= 5 ? 8 : 6} to an ally to add to one roll.`,
+    },
+  },
+  Cleric: {
+    channelDivinity: {
+      id: 'channelDivinity', name: 'Channel Divinity', icon: '⛪', charges: 1, recharge: 'short',
+      options: ['Turn Undead', 'Sacred Flame (boosted)'],
+      description: 'Turn Undead: undead WIS save or flee for 1 minute.',
+    },
+  },
+  Druid: {
+    wildShape: {
+      id: 'wildShape', name: 'Wild Shape', icon: '🐺', charges: 2, recharge: 'short',
+      description: 'Transform into a beast. HP becomes beast HP. Lasts until 0 HP or dismissed.',
+    },
+  },
+  Warlock: {
+    eldritchBlast: { id: 'eldritchBlast', name: 'Eldritch Blast', icon: '🔮', noCharge: true },
+  },
+  Wizard: {
+    arcaneRecovery: {
+      id: 'arcaneRecovery', name: 'Arcane Recovery', icon: '📚', charges: 1, recharge: 'long',
+      description: 'On short rest, recover spell slots with total level ≤ half Wizard level.',
+    },
+  },
+  Sorcerer: {
+    metamagic: { id: 'metamagic', name: 'Metamagic', icon: '✨', noCharge: true },
+  },
 }
 
 export function rollLoot(enemyName, cr) {

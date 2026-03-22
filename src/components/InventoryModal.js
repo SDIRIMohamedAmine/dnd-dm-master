@@ -1,24 +1,36 @@
 // src/components/InventoryModal.js
-import { useState } from 'react'
-import { getItem, applyItemEffect, ITEM_CATEGORIES } from '../lib/items'
+import { useState, useEffect } from 'react'
+import { getItem, applyItemEffect, ITEM_CATEGORIES, resolveItem } from '../lib/items'
 import './InventoryModal.css'
 
 export default function InventoryModal({ character, onUseItem, onDropItem, onClose }) {
   const [selectedItem, setSelectedItem]   = useState(null)
   const [lastResult,   setLastResult]     = useState(null)
   const [activeTab,    setActiveTab]      = useState('all')
+  const [resolvedData, setResolvedData]   = useState({})
 
-  // Parse inventory: character.equipment is array of strings, may have duplicates
-  // Convert to { name: quantity } map
+  // ── Build items BEFORE the useEffect that references it ──────
   const inventoryMap = {}
   for (const item of (character.equipment || [])) {
     if (!item || item.trim() === '') continue
     inventoryMap[item] = (inventoryMap[item] || 0) + 1
   }
-
   const items = Object.entries(inventoryMap).map(([name, qty]) => ({
-    name, qty, data: getItem(name),
+    name, qty, data: resolvedData[name] || getItem(name),
   }))
+
+  // Async-resolve unknown items via RAG (after items is declared)
+  useEffect(() => {
+    const unknownItems = items.filter(i =>
+      i.data.cat === 'misc' && i.data.icon === '📦' && !resolvedData[i.name]
+    )
+    if (!unknownItems.length) return
+    unknownItems.forEach(({ name }) => {
+      resolveItem(name).then(data => {
+        if (data) setResolvedData(prev => ({ ...prev, [name]: data }))
+      }).catch(() => {})
+    })
+  }, [items.length]) // eslint-disable-line
 
   const tabs = [
     { id: 'all',        label: 'All' },
@@ -125,43 +137,60 @@ export default function InventoryModal({ character, onUseItem, onDropItem, onClo
                   </div>
                 </div>
 
-                <div className="inv-detail-desc">{selected.data.desc}</div>
+                <div className="inv-detail-desc">{selected.data.desc || selected.data.passive || 'No description available.'}</div>
 
                 {/* Weapon stats */}
-                {selected.data.effect?.type === 'weapon' && (
+                {selected.data.cat === 'weapon' && (
                   <div className="inv-detail-stats">
-                    <div className="inv-stat-row"><span>Damage</span><span>{selected.data.effect.damage} {selected.data.effect.damageType}</span></div>
-                    <div className="inv-stat-row"><span>Attack</span><span>{selected.data.effect.attackStat === 'finesse' ? 'STR or DEX' : selected.data.effect.attackStat?.toUpperCase()}</span></div>
-                    {selected.data.effect.range && <div className="inv-stat-row"><span>Range</span><span>{selected.data.effect.range} ft</span></div>}
-                    {selected.data.effect.properties?.length > 0 && (
-                      <div className="inv-stat-row"><span>Properties</span><span>{selected.data.effect.properties.join(', ')}</span></div>
-                    )}
+                    {selected.data.damage && <div className="inv-stat-row"><span>Damage</span><span>{selected.data.damage} {selected.data.dmgType}</span></div>}
+                    {selected.data.finesse && <div className="inv-stat-row"><span>Attack stat</span><span>STR or DEX (Finesse)</span></div>}
+                    {selected.data.versatile && <div className="inv-stat-row"><span>Versatile</span><span>{selected.data.versatile} two-handed</span></div>}
+                    {selected.data.props?.length > 0 && <div className="inv-stat-row"><span>Properties</span><span>{selected.data.props.join(', ')}</span></div>}
+                    {selected.data.cost > 0 && <div className="inv-stat-row"><span>Value</span><span>{selected.data.cost} gp</span></div>}
+                    {selected.data.fromDB && <div className="inv-stat-row" style={{color:'#4ecb71',fontSize:'.65rem'}}><span>✓ Verified from SRD</span></div>}
                   </div>
                 )}
 
                 {/* Armor stats */}
-                {selected.data.effect?.type === 'armor' && (
+                {selected.data.cat === 'armor' && (
                   <div className="inv-detail-stats">
-                    {selected.data.effect.baseAC && <div className="inv-stat-row"><span>Base AC</span><span>{selected.data.effect.baseAC}{selected.data.effect.addDex ? ' + DEX' : ''}{selected.data.effect.maxDex !== null && selected.data.effect.maxDex !== undefined ? ` (max +${selected.data.effect.maxDex})` : ''}</span></div>}
-                    {selected.data.effect.acBonus && <div className="inv-stat-row"><span>AC Bonus</span><span>+{selected.data.effect.acBonus}</span></div>}
-                    {selected.data.effect.passive && <div className="inv-stat-row"><span>Passive</span><span>{selected.data.effect.passive}</span></div>}
-                    {selected.data.effect.stealthDisadvantage && <div className="inv-stat-row warn"><span>⚠ Stealth</span><span>Disadvantage</span></div>}
-                    {selected.data.effect.strRequired && <div className="inv-stat-row"><span>Requires</span><span>STR {selected.data.effect.strRequired}+</span></div>}
-                    {selected.data.effect.attunement && <div className="inv-stat-row"><span>Attunement</span><span>Required</span></div>}
+                    {selected.data.baseAC && <div className="inv-stat-row"><span>Base AC</span><span>{selected.data.baseAC}{selected.data.addDex ? ' + DEX' : ''}{selected.data.maxDex != null ? ` (max +${selected.data.maxDex})` : ''}</span></div>}
+                    {selected.data.acBonus && <div className="inv-stat-row"><span>AC Bonus</span><span>+{selected.data.acBonus}</span></div>}
+                    {selected.data.stealthDis && <div className="inv-stat-row" style={{color:'#e08060'}}><span>⚠ Stealth</span><span>Disadvantage</span></div>}
+                    {selected.data.strReq && <div className="inv-stat-row"><span>Requires</span><span>STR {selected.data.strReq}+</span></div>}
+                    {selected.data.attunement && <div className="inv-stat-row"><span>Attunement</span><span>Required</span></div>}
+                    {selected.data.fromDB && <div className="inv-stat-row" style={{color:'#4ecb71',fontSize:'.65rem'}}><span>✓ Verified from SRD</span></div>}
+                  </div>
+                )}
+
+                {/* Magic item / jewelry passives */}
+                {(selected.data.cat === 'jewelry' || selected.data.setCon || selected.data.setStr || selected.data.acBonus || selected.data.saveBonus || selected.data.hpBonus) && (
+                  <div className="inv-detail-stats">
+                    {selected.data.setCon && <div className="inv-stat-row" style={{color:'#4ecb71'}}><span>CON</span><span>Set to {selected.data.setCon} (if lower)</span></div>}
+                    {selected.data.setStr && <div className="inv-stat-row" style={{color:'#4ecb71'}}><span>STR</span><span>Set to {selected.data.setStr} (if lower)</span></div>}
+                    {selected.data.setInt && <div className="inv-stat-row" style={{color:'#4ecb71'}}><span>INT</span><span>Set to {selected.data.setInt} (if lower)</span></div>}
+                    {selected.data.setWis && <div className="inv-stat-row" style={{color:'#4ecb71'}}><span>WIS</span><span>Set to {selected.data.setWis} (if lower)</span></div>}
+                    {selected.data.setCha && <div className="inv-stat-row" style={{color:'#4ecb71'}}><span>CHA</span><span>Set to {selected.data.setCha} (if lower)</span></div>}
+                    {selected.data.acBonus && <div className="inv-stat-row"><span>AC Bonus</span><span>+{selected.data.acBonus}</span></div>}
+                    {selected.data.saveBonus && <div className="inv-stat-row"><span>Saving throws</span><span>+{selected.data.saveBonus}</span></div>}
+                    {selected.data.hpBonus && <div className="inv-stat-row"><span>Max HP</span><span>+{selected.data.hpBonus}</span></div>}
+                    {selected.data.attunement && <div className="inv-stat-row" style={{color:'#c8922a'}}><span>Attunement</span><span>Required</span></div>}
+                    {selected.data.rarity && <div className="inv-stat-row"><span>Rarity</span><span style={{textTransform:'capitalize'}}>{selected.data.rarity}</span></div>}
+                    {selected.data.fromDB && <div className="inv-stat-row" style={{color:'#4ecb71',fontSize:'.65rem'}}><span>✓ Verified from SRD</span></div>}
                   </div>
                 )}
 
                 {/* Heal stats */}
-                {selected.data.effect?.type === 'heal' && (
+                {selected.data.heal && (
                   <div className="inv-detail-stats">
-                    <div className="inv-stat-row heal"><span>Heals</span><span>{selected.data.effect.dice} HP</span></div>
-                    <div className="inv-stat-row"><span>Consumable</span><span>Yes — disappears after use</span></div>
+                    <div className="inv-stat-row heal"><span>Heals</span><span>{selected.data.heal} HP</span></div>
+                    <div className="inv-stat-row"><span>Consumable</span><span>Yes — used on use</span></div>
                   </div>
                 )}
 
-                {/* Passive */}
-                {selected.data.effect?.passive && (
-                  <div className="inv-detail-passive">✦ Passive: {selected.data.effect.passive}</div>
+                {/* Passive text */}
+                {selected.data.passive && !selected.data.setCon && !selected.data.setStr && (
+                  <div className="inv-detail-passive">✦ {selected.data.passive}</div>
                 )}
 
                 <div className="inv-detail-quantity">In bag: ×{selected.qty}</div>

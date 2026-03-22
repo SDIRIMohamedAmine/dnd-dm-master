@@ -343,3 +343,11 @@
   border: 1px solid rgba(78,203,113,.3);
   color: #4ecb71;
 }
+
+
+/* Status effect urgency animations */
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+

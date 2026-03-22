@@ -1,9 +1,12 @@
 // src/hooks/useCampaign.js
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { migrateToCurrency, addGold } from '../lib/currency'
+import { resolveItem, getEquipStatUpdates, calculateAC, detectItemSlot, ITEM_DB, getItem } from '../lib/items'
 import { callSummarizer, parseGameEvents, extractGameEvents, actionNeedsExtraction } from '../lib/openrouter'
 import { levelFromXP, xpToNextLevel, proficiencyBonus } from '../lib/subclasses'
 import { buildInitialSlots, useSlot as applySlotUsage, HIT_DICE } from '../lib/spellSlots'
+import { loadCampaignContent, parseAndRegisterItemFromTag } from '../lib/contentRegistry'
 
 const SUMMARY_EVERY = 10
 
@@ -25,6 +28,9 @@ export function useCampaign(campaignId, userId) {
   useEffect(() => {
     if (!campaignId || !userId) return
     setLoading(true)
+    // Warm up the content registry cache for this campaign
+    // Use try-catch so any import/init error doesn't crash the hook
+    try { loadCampaignContent(campaignId).catch(() => {}) } catch (_) {}
     async function load() {
       try {
         const [msgRes, charRes, memRes, npcRes, questRes] = await Promise.all([
@@ -62,8 +68,112 @@ export function useCampaign(campaignId, userId) {
 
     if (events.newItems?.length) {
       const ex = updatedChar.equipment || []
-      updatedChar.equipment = [...ex, ...events.newItems.filter(i => !ex.includes(i))]
+      const toAdd = events.newItems.filter(i => !ex.includes(i))
+      updatedChar.equipment = [...ex, ...toAdd]
       needsUpdate = true
+
+      // Auto-apply stat effects for known magic items received from DM
+      // e.g. "Amulet of Health" → CON becomes 19 immediately on pickup
+      for (const itemName of toAdd) {
+        try {
+          // Check local ITEM_DB first (fast, no network)
+          // Prefer rich data from [ITEM:] tag if available (more accurate for custom items)
+          const tagData = events.itemData?.[itemName]
+          let localItem = getItem(itemName)
+
+          // If DM provided structured item data via [ITEM:] tag, register it properly
+          if (tagData?.fromTag && tagData.effect) {
+            // Route through registry for proper validation + DB persistence
+            const campaign_id = currentChar.campaign_id
+            if (campaign_id) {
+              try {
+                parseAndRegisterItemFromTag(itemName, tagData.slot || 'misc', tagData.effect, campaign_id)
+                  .then(res => { if (res.ok) console.log('[useCampaign] Item registered from tag:', itemName) })
+                  .catch(() => {})
+              } catch (_) {}
+            }
+            const effect = tagData.effect.toLowerCase()
+            const slot   = tagData.slot || localItem.slot || detectItemSlot(itemName)
+
+            // Parse the effect text for known mechanical patterns
+            const conMatch = effect.match(/con(?:stitution)?\s+(?:to|becomes|set to)\s+(\d+)/i) || effect.match(/sets? con\s+to\s+(\d+)/i)
+            const strMatch = effect.match(/str(?:ength)?\s+(?:to|becomes|set to)\s+(\d+)/i)
+            const acBonus  = effect.match(/\+([123])\s+ac/i)
+            const saveB    = effect.match(/\+([123])\s+(?:to all )?saving throws/i)
+            const dmgMatch = effect.match(/(\d+d\d+(?:[+-]\d+)?)\s+(slashing|piercing|bludgeoning|fire|cold|lightning|necrotic|radiant|poison|psychic|thunder|acid|force)/i)
+            const healMatch= effect.match(/restore[sd]?\s+(\d+d\d+[+-]?\d*)\s+hp/i)
+
+            // Build enriched item data
+            const enriched = {
+              ...localItem,
+              name:    itemName,
+              slot:    slot || localItem.slot,
+              cat:     slot === 'consumable' ? 'consumable' : /mainhand|offhand|ranged/.test(slot) ? 'weapon' : /chest|head|hands|feet|legs/.test(slot) ? 'armor' : 'jewelry',
+              passive: tagData.effect,
+              fromTag: true,
+            }
+            if (conMatch)  { enriched.setCon   = parseInt(conMatch[1]);  enriched.cat = 'jewelry' }
+            if (strMatch)  { enriched.setStr   = parseInt(strMatch[1]);  enriched.cat = 'armor'   }
+            if (acBonus)   enriched.acBonus    = parseInt(acBonus[1])
+            if (saveB)     enriched.saveBonus  = parseInt(saveB[1])
+            if (dmgMatch)  { enriched.damage   = dmgMatch[1]; enriched.dmgType = dmgMatch[2]; enriched.cat = 'weapon' }
+            if (healMatch) { enriched.heal      = healMatch[1]; enriched.cat = 'consumable' }
+
+            // Estimate cost from effect complexity if still generic
+            if (enriched.cat === 'jewelry' && enriched.cost <= 1) enriched.cost = 2000
+            if (enriched.cat === 'weapon'  && enriched.cost <= 1) enriched.cost = 100
+
+            // Store enriched data in ITEM_DB cache so future lookups work
+            if (typeof window !== 'undefined') {
+              window.__customItemCache = window.__customItemCache || {}
+              window.__customItemCache[itemName] = enriched
+            }
+            localItem = enriched
+          }
+
+          const hasStatEffect = localItem && (
+            localItem.setCon || localItem.setStr || localItem.setInt ||
+            localItem.setWis || localItem.setCha || localItem.setDex ||
+            localItem.hpBonus || localItem.acBonus
+          )
+
+          if (hasStatEffect) {
+            const statUpdates = getEquipStatUpdates(localItem, updatedChar)
+
+            // Also auto-equip the item into its natural slot
+            const slot = localItem.slot || detectItemSlot(itemName)
+            if (slot) {
+              const equipped = { ...(updatedChar.equipped || {}), [slot]: itemName }
+              updatedChar.equipped = equipped
+
+              // Recalculate AC with new item
+              const newAC = calculateAC(equipped, {
+                dexterity: updatedChar.dexterity,
+                constitution: statUpdates.constitution || updatedChar.constitution,
+                wisdom: updatedChar.wisdom,
+                class: updatedChar.class,
+              })
+              statUpdates.armor_class = newAC
+            }
+
+            // If CON was raised, update HP accordingly
+            if (statUpdates.constitution) {
+              const oldConMod = Math.floor(((updatedChar.constitution || 10) - 10) / 2)
+              const newConMod = Math.floor((statUpdates.constitution - 10) / 2)
+              const hpDelta   = (newConMod - oldConMod) * (updatedChar.level || 1)
+              if (hpDelta > 0) {
+                statUpdates.max_hp     = (updatedChar.max_hp || 10) + hpDelta
+                statUpdates.current_hp = (updatedChar.current_hp || 10) + hpDelta
+              }
+            }
+
+            Object.assign(updatedChar, statUpdates)
+          }
+        } catch (e) {
+          // Non-critical — item still added to inventory even if stat resolution fails
+          console.warn('[useCampaign] Item stat resolution failed for:', itemName, e.message)
+        }
+      }
     }
     if (events.removeItems?.length) {
       const ex = updatedChar.equipment || []
@@ -83,11 +193,14 @@ export function useCampaign(campaignId, userId) {
       needsUpdate = true
     }
     if (events.goldChange !== null && events.goldChange !== undefined) {
-      updatedChar.gold = Math.max(0, (updatedChar.gold ?? 10) + events.goldChange)
+      // Keep gold as a currency object so all denominations are preserved
+      updatedChar.gold = addGold(updatedChar.gold ?? 10, events.goldChange)
       needsUpdate = true
     }
-    // HP FIX: explicit hpChange from extractor
-    if (events.hpChange !== null && events.hpChange !== undefined && events.hpChange !== 0) {
+    // HP: Only allow OUT-OF-COMBAT healing from narrative tags.
+    // Damage (negative hpChange) is ALWAYS engine-only — never from AI text.
+    // Positive hpChange (healing) is allowed for potions, rests, etc. described by DM.
+    if (events.hpChange !== null && events.hpChange !== undefined && events.hpChange > 0) {
       const newHP = Math.max(0, Math.min(
         updatedChar.max_hp,
         (updatedChar.current_hp ?? updatedChar.max_hp) + events.hpChange
@@ -194,7 +307,11 @@ export function useCampaign(campaignId, userId) {
 
   const updateMemorySummary = useCallback(async (allMessages) => {
     try {
-      const newSummary = await callSummarizer(memory?.summary || '', allMessages.slice(-SUMMARY_EVERY))
+      // Summarize everything EXCEPT the last 4 messages — those stay verbatim in context
+      // so the DM never forgets what just happened
+      const toSummarize = allMessages.slice(0, -4)
+      if (toSummarize.length === 0) return
+      const newSummary = await callSummarizer(memory?.summary || '', toSummarize.slice(-SUMMARY_EVERY))
       if (memory) {
         const { data } = await supabase.from('campaign_memory')
           .update({ summary: newSummary, message_count: allMessages.length, updated_at: new Date().toISOString() })

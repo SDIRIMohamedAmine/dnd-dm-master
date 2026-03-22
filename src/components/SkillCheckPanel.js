@@ -54,9 +54,15 @@ export default function SkillCheckPanel({ check, onResult, onDismiss }) {
             <span className="skc-mod-label">{statLabel} mod</span>
             <span className="skc-mod-val">{check.rawMod >= 0 ? `+${check.rawMod}` : check.rawMod}</span>
           </div>
-          {check.proficient && (
+          {check.proficient && !check.expert && (
             <div className="skc-mod-item proficient">
-              <span className="skc-mod-label">Proficiency</span>
+              <span className="skc-mod-label">● Proficiency</span>
+              <span className="skc-mod-val">+{(check.statMod - check.rawMod)}</span>
+            </div>
+          )}
+          {check.expert && (
+            <div className="skc-mod-item proficient" style={{color:'#f0c040'}}>
+              <span className="skc-mod-label">◆ Expertise</span>
               <span className="skc-mod-val">+{(check.statMod - check.rawMod)}</span>
             </div>
           )}

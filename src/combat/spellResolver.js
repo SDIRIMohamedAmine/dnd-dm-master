@@ -294,24 +294,23 @@ function spellIcon(damageType, school, spellType, isHeal) {
 // ── Get damage dice for a specific slot level ─────────────────
 // Uses damageAtSlot table if available, otherwise scales base dice
 export function getDamageDiceForSlot(spellData, slotLevel, character) {
-  const lvl = String(slotLevel || spellData.level || 1)
+  const charLevel = character?.level || 1
 
-  // 1. Use explicit slot-level table
-  if (spellData.damageAtSlot && Object.keys(spellData.damageAtSlot).length > 0) {
-    // Find the highest slot that's <= requested level
-    const available = Object.keys(spellData.damageAtSlot)
-      .map(Number).filter(k => k <= (slotLevel || spellData.level || 1))
-      .sort((a, b) => b - a)
-    if (available.length > 0) return spellData.damageAtSlot[String(available[0])]
-  }
-
-  // 2. Use character-level table (cantrips)
+  // 1. Cantrips — always use character level scaling table first
+  // (slotLevel is null/0 for cantrips — check damageAtLevel regardless)
   if (spellData.damageAtLevel && Object.keys(spellData.damageAtLevel).length > 0) {
-    const charLevel = character?.level || 1
     const available = Object.keys(spellData.damageAtLevel)
       .map(Number).filter(k => k <= charLevel)
       .sort((a, b) => b - a)
     if (available.length > 0) return spellData.damageAtLevel[String(available[0])]
+  }
+
+  // 2. Leveled spells — use explicit slot-level table
+  if (spellData.damageAtSlot && Object.keys(spellData.damageAtSlot).length > 0) {
+    const available = Object.keys(spellData.damageAtSlot)
+      .map(Number).filter(k => k <= (slotLevel || spellData.level || 1))
+      .sort((a, b) => b - a)
+    if (available.length > 0) return spellData.damageAtSlot[String(available[0])]
   }
 
   // 3. Fall back to base dice

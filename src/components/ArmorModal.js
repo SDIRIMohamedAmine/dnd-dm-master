@@ -1,13 +1,18 @@
 // src/components/ArmorModal.js — BG3-style full equipment page
 import { useState } from 'react'
-import { EQUIPMENT_SLOTS, getItem, calculateAC, getEquippedPassives, detectItemSlot } from '../lib/items'
+import { EQUIPMENT_SLOTS, getItem, calculateAC, getEquippedPassives, detectItemSlot, MAX_ATTUNED_ITEMS } from '../lib/items'
 import './ArmorModal.css'
 
 export default function ArmorModal({ character, onEquip, onUnequip, onClose }) {
   const [selectedSlot, setSelectedSlot] = useState(null)
   const [tooltip,      setTooltip]      = useState(null)
 
-  const equipped   = character.equipped || {}
+  const equipped    = character.equipped || {}
+  // Count attuned items: items in slots where equip data has attunement:true AND slot_attuned is set
+  const attunedCount = Object.keys(equipped).filter(slot => {
+    if (!equipped[slot] || slot.endsWith('_attuned')) return false
+    return getItem(equipped[slot])?.attunement && equipped[`${slot}_attuned`]
+  }).length
   const stats      = { dexterity: character.dexterity, constitution: character.constitution, wisdom: character.wisdom, class: character.class }
   const currentAC  = calculateAC(equipped, stats)
   const passives   = getEquippedPassives(equipped, { ...stats, strength: character.strength })
@@ -78,12 +83,27 @@ export default function ArmorModal({ character, onEquip, onUnequip, onClose }) {
                     {equippedItem?.damage && (
                       <div className="armor-slot-stat">{equippedItem.damage} {equippedItem.dmgType}</div>
                     )}
+                    {equippedItem?.attunement && (
+                      <div className="armor-slot-stat" style={{color: equipped[`${slotId}_attuned`] ? '#7eb8ff' : '#ffa040', fontSize:'.58rem'}}>
+                        {equipped[`${slotId}_attuned`] ? '🔵 Attuned' : `⚠ Needs attunement (${attunedCount}/${MAX_ATTUNED_ITEMS})`}
+                      </div>
+                    )}
                     {equippedItem?.acBonus && (
                       <div className="armor-slot-stat">+{equippedItem.acBonus} AC</div>
                     )}
                   </div>
                   {equippedName && (
-                    <button className="armor-slot-remove" onClick={e=>{e.stopPropagation();onUnequip(slotId)}}>✕</button>
+                    <div style={{display:'flex',gap:'4px',marginTop:'2px'}}>
+                      <button className="armor-slot-remove" onClick={e=>{e.stopPropagation();onUnequip(slotId)}}>✕ Remove</button>
+                      {getItem(equippedName)?.attunement && !equipped[`${slotId}_attuned`] && attunedCount < MAX_ATTUNED_ITEMS && (
+                        <button className="armor-slot-remove" style={{color:'#7eb8ff',borderColor:'rgba(126,184,255,.3)',fontSize:'.6rem'}}
+                          onClick={e=>{e.stopPropagation();onEquip(slotId, equippedName, true)}}>🔵 Attune</button>
+                      )}
+                      {getItem(equippedName)?.attunement && equipped[`${slotId}_attuned`] && (
+                        <button className="armor-slot-remove" style={{color:'#ffa040',borderColor:'rgba(255,160,64,.3)',fontSize:'.6rem'}}
+                          onClick={e=>{e.stopPropagation();onEquip(slotId, equippedName, false)}}>Remove Attunement</button>
+                      )}
+                    </div>
                   )}
                 </button>
 

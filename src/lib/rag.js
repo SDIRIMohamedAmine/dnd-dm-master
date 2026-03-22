@@ -295,8 +295,16 @@ export function buildContextBlock(chunks) {
   return chunks.map((c,i)=>`[${i+1}] ${c.text}`).join('\n\n---\n\n')
 }
 
-export async function lookupMonsterStats(name) {
+export async function lookupMonsterStats(name, campaignId) {
   if(!name) return null
+  // Check custom creature registry first (campaign-specific creatures)
+  if (campaignId) {
+    try {
+      const { getRegisteredCreature } = await import('./contentRegistry')
+      const custom = await getRegisteredCreature(name, campaignId)
+      if (custom) { console.log(`[RAG] Using custom creature: ${name}`); return custom }
+    } catch {}
+  }
   const {data:exact}=await supabase.from('knowledge_chunks').select('content,name').eq('type','monster').ilike('name',name).limit(1)
   if(exact?.[0]) return parseMonsterChunk(exact[0])
   const words=name.split(' ').filter(w=>w.length>3)
@@ -314,20 +322,70 @@ export async function lookupMonsterStats(name) {
 }
 
 function parseMonsterChunk(row) {
-  if(!row) return null
-  const text=row.content
-  const get=(rx)=>{const m=text.match(rx);return m?.[1]?.trim()||null}
-  const ac=parseInt(get(/AC:\s*(\d+)/))||12
-  const hp=parseInt(get(/HP:\s*(\d+)/))||10
-  const cr=get(/CR:\s*([^\s|,\n]+)/)||'1/4'
-  const stats={}
-  ;['STR','DEX','CON','INT','WIS','CHA'].forEach(s=>{stats[s.toLowerCase()]=parseInt(get(new RegExp(`${s}\\s+(\\d+)`)))||10})
-  const attacks=[]
-  const actionSection=text.match(/Actions:\s*([\s\S]+?)(?:\nReactions:|$)/)?.[1]||''
-  const atkMatches=[...actionSection.matchAll(/•\s*([^:]+):\s*[^+]*([+-]\d+)\s*to hit[^.]+Hit:\s*([^(]+)\(([^)]+)\)\s*([\w]+)\s+damage/gi)]
-  for(const m of atkMatches) attacks.push({name:m[1].trim(),bonus:parseInt(m[2])||3,damage:`${m[4].trim()}+${parseInt(m[2])||0}`,type:m[5]?.toLowerCase()||'slashing'})
-  const crXP={'0':10,'1/8':25,'1/4':50,'1/2':100,'1':200,'2':450,'3':700,'4':1100,'5':1800,'6':2300}
-  return{name:row.name,hp,maxHp:hp,ac,cr,xp:crXP[cr]||200,str:stats.str||10,dex:stats.dex||10,con:stats.con||10,int:stats.int||10,wis:stats.wis||10,cha:stats.cha||10,speed:30,attacks:attacks.length?attacks:[{name:'Attack',bonus:3,damage:'1d6+2',type:'slashing'}],flavor:['moves aggressively','strikes with precision'],fromDatabase:true}
+  if (!row) return null
+  const text = row.content
+
+  const getNum = (rx, fallback = 0) => {
+    const m = text.match(rx); return m ? parseInt(m[1]) || fallback : fallback
+  }
+  const getStr = (rx, fallback = '') => {
+    const m = text.match(rx); return m ? m[1].trim() : fallback
+  }
+
+  const ac  = getNum(/AC:\s*(\d+)/, 12)
+  const hp  = getNum(/HP:\s*(\d+)/, 10)
+  const cr  = getStr(/CR:\s*([\d/]+)/, '1/4')
+
+  // Speed (feet)
+  const speedM = text.match(/Speed:[^\n]*(\d+)\s*ft/)
+  const speed  = speedM ? parseInt(speedM[1]) : 30
+
+  // Ability scores — Open5e chunk format: "STR 14 | DEX 12 ..."
+  const stats = {}
+  for (const s of ['STR','DEX','CON','INT','WIS','CHA']) {
+    stats[s.toLowerCase()] = getNum(new RegExp(`${s}\\s+(\\d+)`), 10)
+  }
+
+  // Saving throws (optional line in chunk)
+  const saves = {}
+  const saveMatch = text.match(/Saving Throws:([^\n]+)/)
+  if (saveMatch) {
+    for (const part of saveMatch[1].split(',')) {
+      const sm = part.trim().match(/([A-Z]{3})\s+([+-]\d+)/)
+      if (sm) saves[sm[1].toLowerCase()] = parseInt(sm[2])
+    }
+  }
+
+  // Parse attacks from the Actions block
+  const attacks = []
+  const actionSection = text.match(/Actions:\s*([\s\S]+?)(?=\nReactions:|\nLegendary|$)/)?.[1] || ''
+
+  // Pattern 1: "• Name: ...+N to hit...Hit: N (XdY+Z) type damage"
+  const p1 = [...actionSection.matchAll(/•\s*([^:]+):[^+\-]*?([+-]\d+)\s*to hit[^.]*?Hit:\s*\d+\s*\(([^)]+)\)\s*(\w+)\s+damage/gi)]
+  for (const m of p1) {
+    attacks.push({ name: m[1].trim(), bonus: parseInt(m[2]) || 3, damage: m[3].trim(), type: m[4].toLowerCase() })
+  }
+
+  // Pattern 2: fallback — "• Name: ...deals XdY+Z slashing"
+  if (!attacks.length) {
+    const p2 = [...actionSection.matchAll(/•\s*([^:]+):[^\n]*(\d+d\d+[+-]?\d*)\s+(\w+)\s+damage/gi)]
+    for (const m of p2) {
+      attacks.push({ name: m[1].trim(), bonus: 3, damage: m[2], type: m[3].toLowerCase() })
+    }
+  }
+
+  const crXP = {'0':10,'1/8':25,'1/4':50,'1/2':100,'1':200,'2':450,'3':700,'4':1100,'5':1800,'6':2300,'7':2900,'8':3900}
+
+  return {
+    name: row.name, hp, maxHp: hp, ac, cr,
+    xp: crXP[cr] || 200, speed,
+    str: stats.str, dex: stats.dex, con: stats.con,
+    int: stats.int, wis: stats.wis, cha: stats.cha,
+    savingThrows: saves,
+    attacks: attacks.length ? attacks : [{ name: 'Attack', bonus: 3, damage: '1d6+2', type: 'slashing' }],
+    flavor: ['moves aggressively', 'strikes with precision'],
+    fromDatabase: true,
+  }
 }
 
 // CR value → XP
@@ -435,4 +493,54 @@ export async function selectEncounterMonsters(character, difficulty='medium') {
   }
 
   return encounter.length ? encounter : [candidates[0].name]
+}
+
+// ── localStorage helpers (Fix 10) ────────────────────────
+// Cap at 4MB to stay safely under the 5MB browser limit.
+const LS_KEY     = 'dnd_kb_chunks'
+const LS_MAX_LEN = 4 * 1024 * 1024
+
+export function saveChunksToStorage(chunks) {
+  try {
+    const json = JSON.stringify(chunks)
+    if (json.length > LS_MAX_LEN) {
+      console.warn(`[KB] ${chunks.length} chunks too large for localStorage (${(json.length/1024).toFixed(0)} KB). Skipping.`)
+      return false
+    }
+    localStorage.setItem(LS_KEY, json)
+    return true
+  } catch (e) {
+    console.warn('[KB] localStorage write failed:', e.message)
+    return false
+  }
+}
+
+export function loadChunksFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+
+export function clearChunksFromStorage() {
+  try { localStorage.removeItem(LS_KEY) } catch {}
+}
+
+export function retrieveChunks(query, chunks, topK = 5) {
+  if (!chunks?.length || !query) return []
+  const terms = query.toLowerCase().split(/\s+/).filter(w => w.length > 2)
+  return chunks
+    .map(c => {
+      let score = 0
+      const nl  = c.name?.toLowerCase() || ''
+      const txt = c.text?.toLowerCase() || ''
+      for (const t of terms) {
+        if (nl.includes(t)) score += 5
+        if (txt.includes(t)) score += 1
+      }
+      return { ...c, _score: score }
+    })
+    .filter(c => c._score > 0)
+    .sort((a, b) => b._score - a._score)
+    .slice(0, topK)
 }

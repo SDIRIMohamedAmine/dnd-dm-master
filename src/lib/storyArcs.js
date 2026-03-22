@@ -332,60 +332,30 @@ Rules:
 export function buildArcPromptBlock(arcs) {
   if (!arcs?.length) return ''
 
-  const dominant  = getDominantArc(arcs)
-  const rising    = arcs.filter(a => a.status === 'rising' && a.id !== dominant?.id)
-  const dormant   = arcs.filter(a => a.status === 'dormant')
-  const revealed  = arcs.filter(a => a.revealed)
+  const dominant = getDominantArc(arcs)
+  const others   = arcs.filter(a => a.id !== dominant?.id && a.status !== 'resolved')
 
-  const formatArc = (a, showPower = false) => {
-    const vars = Object.entries(a.variables || {})
-      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
-      .join(', ')
-    return `  • [${a.arc_key}] "${a.title}" — ${a.description}${vars ? ` | Metrics: ${vars}` : ''}${showPower ? ` | Power: ${a.power}/100` : ''}`
-  }
-
-  let block = `═══ DYNAMIC STORY ARCS ═══
-The world has multiple unfolding threats and conflicts. Your narration should subtly reflect the dominant arc.
-Do NOT announce arcs to the player — weave them into the story organically.
-
+  // Keep this block SHORT — small models skip long instructions
+  let block = `STORY ARCS (weave into narration, never announce directly):
 `
 
   if (dominant) {
-    block += `DOMINANT ARC (shape narration around this):
-${formatArc(dominant, true)}
-→ The DM should: drop hints about "${dominant.title}", have relevant NPCs mention ${dominant.faction || 'the faction'}, 
-  use monsters from these types: [${(dominant.lore_tags || []).join(', ')}]
-  Relevant encounters should involve ${dominant.faction || 'this threat'}.
-
+    block += `► DOMINANT: "${dominant.title}" — ${dominant.description}
+  Faction: ${dominant.faction || 'unknown'} | Creatures: ${(dominant.lore_tags || []).slice(0, 3).join(', ')}
+  Hint at this arc through NPC dialogue, environmental details, and encounter choices.
 `
   }
 
-  if (rising.length) {
-    block += `RISING ARCS (these are building in the background):\n`
-    rising.forEach(a => { block += `${formatArc(a)}\n` })
-    block += `→ These should appear as rumors, environmental details, or secondary encounters.\n\n`
+  if (others.length) {
+    block += `◦ Background arcs (mention as distant rumors only):
+`
+    others.slice(0, 2).forEach(a => {
+      block += `  • "${a.title}" — ${a.description.split('.')[0]}.
+`
+    })
   }
 
-  if (revealed.length > 0) {
-    block += `ARCS THE PLAYER HAS DISCOVERED:\n`
-    revealed.forEach(a => { block += `  • "${a.title}" — the player knows this is happening.\n` })
-    block += '\n'
-  }
-
-  if (dormant.length) {
-    block += `DORMANT ARCS (not yet active, but seeds exist):\n`
-    dormant.forEach(a => { block += `  • ${a.title}\n` })
-    block += `→ These can appear as distant rumors or unrelated events that hint at something larger.\n\n`
-  }
-
-  block += `ARC POWER SHIFTS — Actions that should increase/decrease arc power:
-- Player fights cultists → +5 to cult arc (exposed it), -3 if they flee (cult feels emboldened)
-- Player helps a noble house → +8 to political arc
-- Player finds ancient ruins → +5 to artifact/mystery arc
-- Player ignores a crisis → dominant arc gains +3 momentum (world moves without them)
-
-IMPORTANT: Even when the player focuses on one arc, the others continue evolving.
-If the player spends 3 sessions ignoring the cult, the cult ritual progresses — mention it.`
+  block += `Even if the player ignores an arc, that threat keeps growing — reference it occasionally.`
 
   return block
 }

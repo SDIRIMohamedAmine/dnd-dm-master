@@ -51,6 +51,8 @@ export default function CharacterCreation({ campaignTitle, onComplete, onBack })
     equipment:[], spells:[],
     personality_traits:'', ideals:'', bonds:'', flaws:'',
     origin_story:'',
+    skill_proficiencies: [],  // chosen class skills + background skills
+    fighting_style: '',       // Fighter/Paladin/Ranger choice
     // Computed on finish:
     strength:10, dexterity:10, constitution:10,
     intelligence:10, wisdom:10, charisma:10,
@@ -63,7 +65,7 @@ export default function CharacterCreation({ campaignTitle, onComplete, onBack })
   const isCaster = !!clsData?.spellcaster
 
   // Steps depend on whether caster
-  const STEPS    = ['Name & Race','Class','Subclass','Background','Alignment','Stats','Equipment', ...(isCaster?['Spells']:[]), 'Personality','Origin']
+  const STEPS    = ['Name & Race','Class','Subclass','Background','Alignment','Stats','Skills','Equipment', ...(isCaster?['Spells']:[]), 'Personality','Origin']
   const isLast   = step === STEPS.length - 1
   const stepName = STEPS[step] || ''
 
@@ -80,6 +82,7 @@ export default function CharacterCreation({ campaignTitle, onComplete, onBack })
     if (stepName==='Background')   return !!form.background
     if (stepName==='Alignment')    return !!form.alignment
     if (stepName==='Stats')        return Object.keys(form.assigned).length===6
+    if (stepName==='Skills')       return true  // pre-selected, can just proceed
     if (stepName==='Equipment')    return true  // auto-equipped from class; extras optional
     if (stepName==='Spells')       return true  // spells optional
     if (stepName==='Personality')  return true
@@ -145,6 +148,25 @@ Write flowing prose — no headers, no lists. End on why ${sub} began adventurin
 
   // ── Finish ──────────────────────────────────────────────
   async function handleFinish() {
+    // Validate required fields before saving
+    const missing = []
+    if (!form.name.trim() || form.name.trim().length < 2) missing.push('Character name (min 2 characters)')
+    if (!form.race)       missing.push('Race')
+    if (!form.class)      missing.push('Class')
+    if (!form.background) missing.push('Background')
+    if (!form.alignment)  missing.push('Alignment')
+    if (!form.gender)     missing.push('Gender')
+    if (Object.keys(form.assigned).length < 6) missing.push('All 6 ability scores must be assigned')
+
+    // Check for illegal stat values
+    const statValues = Object.values(form.assigned)
+    if (statValues.some(v => v < 3 || v > 20)) missing.push('Ability scores must be between 3 and 20')
+
+    if (missing.length > 0) {
+      setError('Please complete: ' + missing.join(', '))
+      return
+    }
+
     setSaving(true); setError(null)
     try {
       // Build final base stats from assignment
@@ -186,6 +208,12 @@ Write flowing prose — no headers, no lists. End on why ${sub} began adventurin
       // Background skills
       const bgSkills = bgData?.skills || []
 
+      // Build final skill proficiency list: class choices + background skills (deduplicated)
+      const allSkillProfs = [...new Set([...(form.skill_proficiencies || []), ...bgSkills])]
+
+      // Class saving throw proficiencies
+      const clsSaveThrows = clsData?.savingThrows || []
+
       await onComplete({
         name: form.name.trim(),
         avatar: form.avatar || (AVATARS_BY_RACE[form.race]?.[0] || '⚔️'),
@@ -209,6 +237,9 @@ Write flowing prose — no headers, no lists. End on why ${sub} began adventurin
         spells:        form.spells,
         spell_slots:   spellSlots,
         languages:     ['Common', ...(raceData?.languages?.filter(l=>l!=='Common')||[])],
+        skill_proficiencies:      allSkillProfs,
+        saving_throw_proficiencies: clsSaveThrows,
+        fighting_style: form.fighting_style || null,
         // race_traits, class_features, skill_proficiencies stored in notes/prompt
         // not separate DB columns — they're computed from race/class in the system prompt
         personality_traits: form.personality_traits,
@@ -497,6 +528,91 @@ Write flowing prose — no headers, no lists. End on why ${sub} began adventurin
             </div>
           </div>
         )}
+
+        {/* ── STEP: Skills ── */}
+        {stepName==='Skills' && (() => {
+          const ALL_SKILLS = ['Acrobatics','Animal Handling','Arcana','Athletics','Deception',
+            'History','Insight','Intimidation','Investigation','Medicine','Nature','Perception',
+            'Performance','Persuasion','Religion','Sleight of Hand','Stealth','Survival']
+          const bgSkillGrants = bgData?.skills || []
+          const classSkillOpts = clsData?.skillChoices?.from === 'any' ? ALL_SKILLS : (clsData?.skillChoices?.from || [])
+          const classCount = clsData?.skillChoices?.count || 2
+          const chosen = form.skill_proficiencies || []
+          const classChosen = chosen.filter(s => classSkillOpts.includes(s) && !bgSkillGrants.includes(s))
+          const fightingStyles = {
+            Fighter: ['Archery (+2 to ranged attack rolls)','Defense (+1 AC in armor)','Dueling (+2 damage with one-handed weapon)','Great Weapon Fighting (reroll 1-2 on damage)','Protection (impose disadvantage on attacker)','Two-Weapon Fighting (add stat to off-hand)'],
+            Paladin: ['Defense (+1 AC in armor)','Dueling (+2 damage with one-handed weapon)','Great Weapon Fighting (reroll 1-2 on damage)','Protection (impose disadvantage on attacker)'],
+            Ranger:  ['Archery (+2 to ranged attack rolls)','Defense (+1 AC in armor)','Dueling (+2 damage with one-handed weapon)','Two-Weapon Fighting (add stat to off-hand)'],
+          }
+          const styleOptions = fightingStyles[form.class] || []
+          const needsStyle = styleOptions.length > 0
+
+          function toggleSkill(skill) {
+            const isClass = classSkillOpts.includes(skill) && !bgSkillGrants.includes(skill)
+            if (!isClass) return
+            const next = chosen.includes(skill) ? chosen.filter(s => s !== skill) : [...chosen, skill]
+            const classNext = next.filter(s => classSkillOpts.includes(s) && !bgSkillGrants.includes(s))
+            if (classNext.length <= classCount) set('skill_proficiencies', next)
+          }
+
+          return (
+            <div className="cc-body">
+              <div className="cc-field">
+                <label className="cc-field-label">Skill Proficiencies</label>
+                <p className="cc-hint">
+                  Your background grants: <strong>{bgSkillGrants.join(', ') || 'none'}</strong>
+                  <br/>Choose {classCount} more from your class list:
+                </p>
+                <div style={{display:'flex',flexWrap:'wrap',gap:'6px',marginTop:'8px'}}>
+                  {ALL_SKILLS.map(skill => {
+                    const fromBG    = bgSkillGrants.includes(skill)
+                    const available = classSkillOpts.includes(skill)
+                    const picked    = chosen.includes(skill)
+                    const atCap     = classChosen.length >= classCount && !classChosen.includes(skill)
+                    return (
+                      <button key={skill}
+                        onClick={() => toggleSkill(skill)}
+                        disabled={fromBG || (!available) || (atCap && !fromBG)}
+                        style={{
+                          padding:'4px 10px', borderRadius:'14px', fontSize:'.7rem', cursor: fromBG||!available ? 'default':'pointer',
+                          border: fromBG ? '1px solid rgba(78,203,113,.5)' : picked ? '1px solid rgba(200,146,42,.6)' : available ? '1px solid rgba(255,255,255,.2)' : '1px solid rgba(255,255,255,.08)',
+                          background: fromBG ? 'rgba(78,203,113,.12)' : picked ? 'rgba(200,146,42,.15)' : 'transparent',
+                          color: fromBG ? '#4ecb71' : picked ? 'var(--gold,#c8922a)' : available ? 'var(--parch,#e8dcc0)' : 'rgba(255,255,255,.25)',
+                          opacity: (atCap && !picked && !fromBG) ? 0.4 : 1,
+                        }}>
+                        {fromBG ? '✓ ' : picked ? '✓ ' : ''}{skill}
+                      </button>
+                    )
+                  })}
+                </div>
+                <p className="cc-hint" style={{marginTop:'8px',color:'#4ecb71'}}>
+                  {classChosen.length}/{classCount} class skills chosen
+                </p>
+              </div>
+
+              {needsStyle && (
+                <div className="cc-field" style={{marginTop:'16px'}}>
+                  <label className="cc-field-label">Fighting Style</label>
+                  <p className="cc-hint">Choose one combat style that defines how you fight.</p>
+                  <div style={{display:'flex',flexDirection:'column',gap:'6px',marginTop:'8px'}}>
+                    {styleOptions.map(style => (
+                      <button key={style}
+                        onClick={() => set('fighting_style', style)}
+                        style={{
+                          padding:'8px 12px',borderRadius:'8px',fontSize:'.76rem',cursor:'pointer',textAlign:'left',
+                          border: form.fighting_style === style ? '1px solid rgba(200,146,42,.6)' : '1px solid rgba(255,255,255,.15)',
+                          background: form.fighting_style === style ? 'rgba(200,146,42,.12)' : 'transparent',
+                          color: form.fighting_style === style ? 'var(--gold,#c8922a)' : 'var(--parch,#e8dcc0)',
+                        }}>
+                        {form.fighting_style === style ? '◉ ' : '○ '}{style}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* ── STEP: Equipment ── */}
         {stepName==='Equipment' && (

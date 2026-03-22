@@ -4,8 +4,8 @@ import { useAuth } from '../lib/AuthContext'
 import './AuthPage.css'
 
 export default function AuthPage() {
-  const { signIn, signUp } = useAuth()
-  const [mode,     setMode]     = useState('login')   // 'login' | 'signup'
+  const { signIn, signUp, resetPassword } = useAuth()
+  const [mode,     setMode]     = useState('login')   // 'login' | 'signup' | 'reset'
   const [email,    setEmail]    = useState('')
   const [password, setPassword] = useState('')
   const [error,    setError]    = useState(null)
@@ -20,6 +20,9 @@ export default function AuthPage() {
     try {
       if (mode === 'signup') {
         await signUp(email, password)
+        setDone(true)
+      } else if (mode === 'reset') {
+        await resetPassword(email)
         setDone(true)
       } else {
         await signIn(email, password)
@@ -38,8 +41,10 @@ export default function AuthPage() {
           <div className="auth-icon">📜</div>
           <h2 className="auth-title">Check your email</h2>
           <p className="auth-sub">
-            We sent a confirmation link to <strong>{email}</strong>.
-            Click it, then come back and log in.
+            {mode === 'reset'
+              ? <>We sent a password reset link to <strong>{email}</strong>.</>
+              : <>We sent a confirmation link to <strong>{email}</strong>. Click it, then come back and log in.</>
+            }
           </p>
           <button className="auth-link" onClick={() => { setMode('login'); setDone(false) }}>
             Back to login
@@ -59,7 +64,7 @@ export default function AuthPage() {
 
       <div className="auth-card">
         <h2 className="auth-title">
-          {mode === 'login' ? 'Enter the realm' : 'Join the realm'}
+          {mode === 'login' ? 'Enter the realm' : mode === 'signup' ? 'Join the realm' : 'Reset your password'}
         </h2>
 
         <form className="auth-form" onSubmit={handleSubmit}>
@@ -75,31 +80,44 @@ export default function AuthPage() {
             />
           </div>
 
-          <div className="auth-field">
-            <label>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder={mode === 'signup' ? 'Min. 6 characters' : '••••••••'}
-              required
-              minLength={6}
-              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-            />
-          </div>
+          {mode !== 'reset' && (
+            <div className="auth-field">
+              <label>Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder={mode === 'signup' ? 'Min. 6 characters' : '••••••••'}
+                required={mode !== 'reset'}
+                minLength={6}
+                autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+              />
+            </div>
+          )}
 
           {error && <div className="auth-error">{error}</div>}
 
           <button className="auth-submit" type="submit" disabled={loading}>
-            {loading ? '⏳ Please wait…' : mode === 'login' ? '⚔ Enter' : '📜 Create Account'}
+            {loading ? '⏳ Please wait…'
+              : mode === 'login' ? '⚔ Enter'
+              : mode === 'signup' ? '📜 Create Account'
+              : '📨 Send Reset Link'}
           </button>
         </form>
 
         <div className="auth-switch">
-          {mode === 'login' ? (
-            <>No account? <button className="auth-link" onClick={() => { setMode('signup'); setError(null) }}>Sign up</button></>
-          ) : (
+          {mode === 'login' && (
+            <>
+              No account? <button className="auth-link" onClick={() => { setMode('signup'); setError(null) }}>Sign up</button>
+              <span className="auth-sep"> · </span>
+              <button className="auth-link" onClick={() => { setMode('reset'); setError(null) }}>Forgot password?</button>
+            </>
+          )}
+          {mode === 'signup' && (
             <>Have an account? <button className="auth-link" onClick={() => { setMode('login'); setError(null) }}>Log in</button></>
+          )}
+          {mode === 'reset' && (
+            <>Remembered it? <button className="auth-link" onClick={() => { setMode('login'); setError(null) }}>Back to login</button></>
           )}
         </div>
       </div>

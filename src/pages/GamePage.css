@@ -183,3 +183,56 @@
 .quest-reward { font-size:.7rem;color:var(--gold);background:rgba(200,146,42,.07);border-radius:5px;padding:3px 8px;margin-top:2px; }
 .quest-progress-wrap { height:3px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden;margin-top:6px; }
 .quest-progress-bar { height:100%;background:linear-gradient(90deg,rgba(200,146,42,.4),rgba(200,146,42,.7));border-radius:2px;transition:width .5s ease; }
+
+/* ══════════════════════════════════════════════
+   MOBILE RESPONSIVE — fixes for screens < 768px
+   ══════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* Topbar: wrap and shrink */
+  .game-topbar { padding: 6px 10px; gap: 6px; }
+  .game-topbar-title { font-size: .68rem; }
+  .game-topbar-char { display: none; }         /* hide char stats — they're in sheet */
+  .game-topbar-actions { gap: 4px; }
+  .game-sidebar-btn { padding: 3px 7px; font-size: .62rem; }
+
+  /* Body: stack vertically instead of side-by-side */
+  .game-body { flex-direction: column; }
+
+  /* Sidebar: slide over chat, full width, limited height */
+  .game-sidebar {
+    width: 100% !important;
+    max-height: 55vh;
+    overflow-y: auto;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    order: -1;  /* sidebar on top when open */
+  }
+
+  /* Messages: tighter padding */
+  .game-messages { padding: 10px 10px 6px; gap: 12px; }
+  .gm-bubble { font-size: .88rem; padding: 8px 10px; }
+  .gm-bubble-wrap { max-width: 92%; }
+
+  /* Input area */
+  .game-input-area { padding: 8px 10px 12px; }
+  .game-input { font-size: .9rem; }
+  .game-send { width: 38px; height: 38px; }
+
+  /* Memory banner: single line truncate */
+  .memory-banner { padding: 4px 10px; }
+  .memory-text { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+@media (max-width: 480px) {
+  .game-topbar-title { display: none; }
+  .game-messages { padding: 8px 8px 4px; }
+  .gm-bubble { font-size: .84rem; }
+  .game-sidebar-btn { font-size: .58rem; padding: 3px 5px; }
+}
+
+
+@keyframes inspirePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(240,192,64,.4); }
+  50% { box-shadow: 0 0 0 6px rgba(240,192,64,.0); }
+}
+

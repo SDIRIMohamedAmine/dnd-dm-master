@@ -815,3 +815,40 @@ export function calcBaseAC(className, dexterity, constitution) {
   if (className === 'Monk')      return 10 + dexMod + Math.floor(/* wis placeholder */ 0)
   return 10 + dexMod  // Everyone else: base unarmored (armor will override)
 }
+
+// ── PASSIVE SCORES ─────────────────────────────────────────
+// Passive Perception = 10 + WIS mod + proficiency bonus (if proficient)
+// Passive Investigation = 10 + INT mod + proficiency bonus (if proficient)
+export function getPassivePerception(character) {
+  const wisMod  = Math.floor(((character.wisdom || 10) - 10) / 2)
+  const prof    = (character.skill_proficiencies || []).some(s => /perception/i.test(s))
+  const profBonus = prof ? (character.proficiency_bonus || 2) : 0
+  return 10 + wisMod + profBonus
+}
+
+export function getPassiveInvestigation(character) {
+  const intMod  = Math.floor(((character.intelligence || 10) - 10) / 2)
+  const prof    = (character.skill_proficiencies || []).some(s => /investigation/i.test(s))
+  const profBonus = prof ? (character.proficiency_bonus || 2) : 0
+  return 10 + intMod + profBonus
+}
+
+export function getSkillBonus(character, skillName) {
+  const SKILL_STATS = {
+    'Acrobatics':'dexterity','Animal Handling':'wisdom','Arcana':'intelligence',
+    'Athletics':'strength','Deception':'charisma','History':'intelligence',
+    'Insight':'wisdom','Intimidation':'charisma','Investigation':'intelligence',
+    'Medicine':'wisdom','Nature':'intelligence','Perception':'wisdom',
+    'Performance':'charisma','Persuasion':'charisma','Religion':'intelligence',
+    'Sleight of Hand':'dexterity','Stealth':'dexterity','Survival':'wisdom',
+  }
+  const stat    = SKILL_STATS[skillName] || 'charisma'
+  const score   = character[stat] || 10
+  const mod     = Math.floor((score - 10) / 2)
+  const profs   = character.skill_proficiencies || []
+  const experts = character.expertise_skills   || []
+  const profBonus = character.proficiency_bonus || 2
+  if (experts.some(s => s.toLowerCase() === skillName.toLowerCase())) return mod + profBonus * 2
+  if (profs.some(s => s.toLowerCase() === skillName.toLowerCase()))   return mod + profBonus
+  return mod
+}

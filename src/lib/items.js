@@ -96,22 +96,67 @@ export const ITEM_DB = {
 export function getItem(name) {
   if (!name) return { cat:'misc', category:'misc', cost:1, weight:0, icon:'📦', desc:'', name }
   let data = null
-  if (ITEM_DB[name]) {
+
+  // 1. Check runtime cache for custom items enriched from [ITEM:] tags
+  const cache = (typeof window !== 'undefined' && window.__customItemCache) || {}
+  if (cache[name]) data = { ...cache[name] }
+
+  // 2. Exact match in static DB
+  if (!data && ITEM_DB[name]) {
     data = { ...ITEM_DB[name], name }
-  } else {
-    const key = Object.keys(ITEM_DB).find(k => k.toLowerCase() === name.toLowerCase())
-    if (key) { data = { ...ITEM_DB[key], name: key } }
   }
+
+  // 3. Case-insensitive match
+  if (!data) {
+    const key = Object.keys(ITEM_DB).find(k => k.toLowerCase() === name.toLowerCase())
+    if (key) data = { ...ITEM_DB[key], name: key }
+  }
+
+  // 4. Keyword/partial match — "Amulet of Health" → find "Amulet of Health" in DB
   if (!data) {
     const partial = Object.keys(ITEM_DB).find(k =>
-      name.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(name.toLowerCase().split(' ')[0])
+      name.toLowerCase().includes(k.toLowerCase()) ||
+      k.toLowerCase().includes(name.toLowerCase().split(' ')[0])
     )
     if (partial) data = { ...ITEM_DB[partial], name: partial }
   }
-  if (!data) data = { cat:'misc', cost:1, weight:0, icon:'📦', desc:'An item from your adventures.', name }
-  // Always expose both 'cat' and 'category' for backward compatibility
+
+  // 5. Generic fallback — keeps category hints from name patterns
+  if (!data) {
+    const n = name.toLowerCase()
+    let cat = 'misc', icon = '📦', slot = null
+    if (/sword|blade|axe|dagger|mace|staff|bow|spear|hammer|scimitar/.test(n)) { cat='weapon'; icon='⚔️'; slot='mainhand' }
+    else if (/armor|mail|plate|leather|breastplate|hide/.test(n))               { cat='armor';  icon='🛡️'; slot='chest' }
+    else if (/amulet|necklace|pendant/.test(n))                                 { cat='jewelry';icon='📿'; slot='amulet' }
+    else if (/ring/.test(n))                                                    { cat='jewelry';icon='💍'; slot='ring1' }
+    else if (/cloak|cape/.test(n))                                              { cat='armor';  icon='🧣'; slot='cloak' }
+    else if (/potion|elixir|vial/.test(n))                                      { cat='consumable';icon='🧪' }
+    else if (/scroll/.test(n))                                                  { cat='consumable';icon='📜' }
+    data = { cat, cost: cat === 'weapon' ? 15 : cat === 'jewelry' ? 500 : 5, weight: 1, icon, desc: 'An item from your adventures.', name, ...(slot ? {slot} : {}) }
+  }
+
   if (!data.category) data = { ...data, category: data.cat || 'misc' }
   return data
+}
+
+// ── ATTUNEMENT SYSTEM ─────────────────────────────────────
+export const MAX_ATTUNED_ITEMS = 3
+
+export function getAttunedItems(equipped) {
+  if (!equipped) return []
+  const attuned = []
+  for (const [slot, itemName] of Object.entries(equipped)) {
+    if (!itemName) continue
+    const data = getItem(itemName)
+    if (data?.attunement && equipped[`${slot}_attuned`]) attuned.push(itemName)
+  }
+  return attuned
+}
+
+export function canAttune(equipped, newItemName) {
+  const attuned = getAttunedItems(equipped)
+  if (attuned.includes(newItemName)) return true
+  return attuned.length < MAX_ATTUNED_ITEMS
 }
 
 // ── SLOT DETECTION ────────────────────────────────────────
@@ -202,23 +247,253 @@ export function applyItemEffect(itemName, character) {
   return { message:`You use the ${itemName}.`, updates:{}, consume: item.cat==='consumable' }
 }
 
-// ── ASYNC LOOKUP from DB ──────────────────────────────────
+// ── ASYNC LOOKUP from RAG database ──────────────────────
 export async function lookupItemFromDB(name) {
+  if (!name) return null
   try {
-    const { data } = await supabase.from('knowledge_chunks')
-      .select('content, name, type').eq('type','equipment').ilike('name', name).limit(1)
-    if (!data?.[0]) return null
-    const text  = data[0].content
-    const cost  = text.match(/Cost:\s*(\d+)\s*(gp|sp|cp)/i)
-    const ac    = text.match(/AC:\s*(\d+)/)
-    const dmg   = text.match(/Damage:\s*([^\n|]+)/)
-    const props = text.match(/Properties:\s*([^\n]+)/)
-    return {
-      name:       data[0].name,
-      cost:       cost ? parseInt(cost[1])*(cost[2]==='sp'?.1:cost[2]==='cp'?.01:1) : null,
-      ac:         ac   ? parseInt(ac[1]) : null,
-      damage:     dmg  ? dmg[1].trim()   : null,
-      properties: props? props[1].split(',').map(p=>p.trim()) : [],
+    const types = ['magic-item', 'weapon', 'armor']
+
+    // 1. Exact / partial name match
+    for (const type of types) {
+      const { data } = await supabase.from('knowledge_chunks')
+        .select('content, name, type')
+        .eq('type', type)
+        .ilike('name', `%${name}%`)
+        .limit(3)
+      if (data?.length) {
+        const best = data.sort((a, b) =>
+          Math.abs(a.name.length - name.length) - Math.abs(b.name.length - name.length)
+        )[0]
+        return parseItemChunk(best)
+      }
     }
+
+    // 2. Keyword fallback for custom/flavored names
+    // "Blade of Blood" → look for words like blade, sword, dagger in weapon DB
+    const keywords = extractItemKeywords(name)
+    for (const kw of keywords) {
+      for (const type of types) {
+        const { data } = await supabase.from('knowledge_chunks')
+          .select('content, name, type')
+          .eq('type', type)
+          .ilike('name', `%${kw}%`)
+          .limit(2)
+        if (data?.length) {
+          const parsed = parseItemChunk(data[0])
+          if (parsed) {
+            // Keep the original custom name but use the base item's stats
+            return { ...parsed, name, customName: name, basedOn: data[0].name }
+          }
+        }
+      }
+    }
+
+    return null
   } catch { return null }
+}
+
+// Extract meaningful D&D item keywords from a custom name like "Blade of Blood"
+function extractItemKeywords(name) {
+  const n = name.toLowerCase()
+  const keywords = []
+  // Weapon type keywords
+  if (/blade|sword|saber/.test(n))        keywords.push('longsword', 'shortsword')
+  if (/dagger|knife|dirk|stiletto/.test(n)) keywords.push('dagger')
+  if (/axe|hatchet/.test(n))             keywords.push('handaxe', 'battleaxe')
+  if (/mace|club|maul|hammer/.test(n))   keywords.push('mace', 'warhammer')
+  if (/staff|rod|scepter/.test(n))       keywords.push('quarterstaff')
+  if (/bow|arrow/.test(n))               keywords.push('longbow', 'shortbow')
+  if (/spear|lance|pike|halberd/.test(n))keywords.push('spear')
+  if (/wand|want/.test(n))               keywords.push('wand')
+  // Armor keywords
+  if (/shield/.test(n))                  keywords.push('shield')
+  if (/helm|crown|circlet/.test(n))      keywords.push('helm')
+  if (/plate|mail|armor/.test(n))        keywords.push('plate', 'chain mail')
+  // Magic item keywords
+  if (/amulet|necklace|pendant/.test(n)) keywords.push('amulet')
+  if (/ring/.test(n))                    keywords.push('ring')
+  if (/cloak|mantle|cape/.test(n))       keywords.push('cloak')
+  if (/boot|shoe/.test(n))               keywords.push('boots')
+  if (/gauntlet|glove/.test(n))          keywords.push('gauntlets')
+  if (/belt|girdle/.test(n))             keywords.push('belt')
+  if (/potion/.test(n))                  keywords.push('potion')
+  if (/scroll/.test(n))                  keywords.push('scroll')
+  return keywords
+}
+
+// Parse a knowledge_chunk row into a normalized item object
+function parseItemChunk(row) {
+  if (!row) return null
+  const text = row.content
+  const type = row.type
+
+  const getN = (rx, fallback = null) => { const m = text.match(rx); return m ? parseFloat(m[1]) : fallback }
+  const getS = (rx, fallback = '')   => { const m = text.match(rx); return m ? m[1].trim() : fallback }
+
+  // Parse cost — handles "50 gp", "5 sp", "10 cp"
+  const costMatch = text.match(/Cost:\s*([\d,]+)\s*(cp|sp|ep|gp|pp)/i)
+  let cost = 0
+  if (costMatch) {
+    const amt  = parseFloat(costMatch[1].replace(',', ''))
+    const unit = costMatch[2].toLowerCase()
+    const toGP = { cp: 0.01, sp: 0.1, ep: 0.5, gp: 1, pp: 10 }
+    cost = amt * (toGP[unit] || 1)
+  }
+
+  if (type === 'weapon') {
+    const dmgMatch  = text.match(/Damage:\s*([\d]+d[\d]+(?:[+-][\d]+)?)/)
+    const dmgType   = getS(/Damage:\s*[^\n]*\s+(\w+)\s*damage/i) || getS(/(slashing|piercing|bludgeoning)/i)
+    const propsText = getS(/Properties:\s*([^\n]+)/)
+    const props     = propsText ? propsText.split(',').map(p => p.trim()).filter(Boolean) : []
+    const finesse   = props.some(p => /finesse/i.test(p))
+    const versatile = props.find(p => /versatile/i.test(p))
+    const rangeM    = text.match(/Range:\s*([\d/]+)/)
+    return {
+      name:    row.name, cat: 'weapon', slot: 'mainhand',
+      damage:  dmgMatch?.[1] || '1d6',
+      dmgType: dmgType || 'slashing',
+      cost, weight: getN(/Weight:\s*([\d.]+)/) || 1,
+      props,
+      finesse, versatile: versatile ? versatile.match(/([\d]+d[\d]+)/)?.[1] : null,
+      ranged:  rangeM ? true : false,
+      icon: /bow|crossbow/i.test(row.name) ? '🏹' : '⚔️',
+      desc: text.slice(0, 200),
+      fromDB: true,
+    }
+  }
+
+  if (type === 'armor') {
+    const acStr    = getS(/AC:\s*([^\n]+)/)
+    const baseAC   = getN(/AC:\s*(\d+)/) || 10
+    const addDex   = /\+\s*Dex/i.test(acStr)
+    const maxDexM  = acStr.match(/max\s*\+?(\d+)/i)
+    const strReq   = getN(/Strength required:\s*(\d+)/)
+    const stealth  = /Stealth disadvantage/i.test(text)
+    return {
+      name: row.name, cat: 'armor', slot: 'chest',
+      baseAC, addDex, maxDex: maxDexM ? parseInt(maxDexM[1]) : (addDex ? null : 0),
+      strReq: strReq || null, stealthDis: stealth,
+      cost, weight: getN(/Weight:\s*([\d.]+)/) || 10,
+      icon: '🛡️', desc: text.slice(0, 200), fromDB: true,
+    }
+  }
+
+  if (type === 'magic-item') {
+    const rarity     = getS(/Rarity:\s*(\w+)/)
+    const attunement = /Attunement: Required/i.test(text)
+    const desc       = text.replace(/^MAGIC ITEM:.*\n/, '').replace(/Type:.*\n/, '').replace(/Rarity:.*\n/, '').replace(/Attunement:.*\n/, '').trim()
+
+    // Parse mechanical effects from description text
+    const item = {
+      name: row.name, cat: 'jewelry', slot: detectSlotFromName(row.name),
+      cost: rarity === 'common' ? 100 : rarity === 'uncommon' ? 500 : rarity === 'rare' ? 5000 : rarity === 'very rare' ? 50000 : 1000,
+      weight: 0, attunement, rarity, desc, icon: '✨', fromDB: true,
+    }
+
+    // Detect stat-setting effects (Gauntlets of Ogre Power, Amulet of Health, etc.)
+    const setConM = desc.match(/Constitution score (?:is|becomes|to) (\d+)/i) || desc.match(/sets? (?:your )?(?:CON|Constitution) to (\d+)/i)
+    const setStrM = desc.match(/Strength score (?:is|becomes|to) (\d+)/i)     || desc.match(/sets? (?:your )?(?:STR|Strength) to (\d+)/i)
+    const setIntM = desc.match(/Intelligence score (?:is|becomes|to) (\d+)/i) || desc.match(/sets? (?:your )?(?:INT|Intelligence) to (\d+)/i)
+    const setWisM = desc.match(/Wisdom score (?:is|becomes|to) (\d+)/i)       || desc.match(/sets? (?:your )?(?:WIS|Wisdom) to (\d+)/i)
+    const setChaM = desc.match(/Charisma score (?:is|becomes|to) (\d+)/i)     || desc.match(/sets? (?:your )?(?:CHA|Charisma) to (\d+)/i)
+    const setDexM = desc.match(/Dexterity score (?:is|becomes|to) (\d+)/i)    || desc.match(/sets? (?:your )?(?:DEX|Dexterity) to (\d+)/i)
+
+    if (setConM) { item.setCon = parseInt(setConM[1]); item.passive = `CON becomes ${setConM[1]} (if lower)`; item.cat = 'jewelry'; item.slot = 'amulet' }
+    if (setStrM) { item.setStr = parseInt(setStrM[1]); item.passive = `STR becomes ${setStrM[1]} (if lower)`; item.cat = 'armor';   item.slot = 'hands'  }
+    if (setIntM) { item.setInt = parseInt(setIntM[1]); item.passive = `INT becomes ${setIntM[1]} (if lower)`; item.cat = 'jewelry'; item.slot = 'head'   }
+    if (setWisM) { item.setWis = parseInt(setWisM[1]); item.passive = `WIS becomes ${setWisM[1]} (if lower)` }
+    if (setChaM) { item.setCha = parseInt(setChaM[1]); item.passive = `CHA becomes ${setChaM[1]} (if lower)` }
+    if (setDexM) { item.setDex = parseInt(setDexM[1]); item.passive = `DEX becomes ${setDexM[1]} (if lower)` }
+
+    // AC bonus (+1, +2, +3 items)
+    const acBonusM = desc.match(/\+([123])\s+bonus to AC/i) || desc.match(/AC (?:by |is increased by )?\+([123])/i)
+    if (acBonusM) item.acBonus = parseInt(acBonusM[1])
+
+    // Save bonus
+    const saveBonusM = desc.match(/\+([123])\s+(?:bonus to )?(?:all )?saving throws/i)
+    if (saveBonusM) item.saveBonus = parseInt(saveBonusM[1])
+
+    // HP max bonus
+    const hpBonusM = desc.match(/hit point maximum (?:increases|increase) by (\d+)/i)
+    if (hpBonusM) item.hpBonus = parseInt(hpBonusM[1])
+
+    if (!item.passive) item.passive = desc.slice(0, 120)
+    return item
+  }
+
+  return { name: row.name, cat: 'misc', cost, icon: '📦', desc: text.slice(0,200), fromDB: true }
+}
+
+function detectSlotFromName(name) {
+  const n = name.toLowerCase()
+  if (/amulet|necklace|pendant|talisman|collar/.test(n)) return 'amulet'
+  if (/ring/.test(n))                                      return 'ring1'
+  if (/gauntlet|glove/.test(n))                            return 'hands'
+  if (/boot|shoe/.test(n))                                 return 'feet'
+  if (/helm|hat|cap|hood|crown|headband|circlet/.test(n))  return 'head'
+  if (/cloak|cape|mantle/.test(n))                         return 'cloak'
+  if (/belt/.test(n))                                      return 'cloak'
+  if (/sword|axe|mace|hammer|staff|dagger|blade|bow/.test(n)) return 'mainhand'
+  if (/armor|mail|plate/.test(n))                          return 'chest'
+  return 'amulet'
+}
+
+// Async version of getItem — tries ITEM_DB first, then RAG
+export async function resolveItem(name) {
+  const local = getItem(name)
+  // If we got a real match (not the generic fallback), use it
+  if (local && local.cat !== 'misc' && !local.desc?.includes('An item from your adventures')) return local
+  // Otherwise try the database
+  const fromDB = await lookupItemFromDB(name)
+  return fromDB || local
+}
+
+// ── EQUIP / UNEQUIP STAT EFFECTS ─────────────────────────
+// Returns the stat updates to apply when equipping an item
+export function getEquipStatUpdates(itemData, character) {
+  if (!itemData) return {}
+  const updates = {}
+  // Stat-setting items (Amulet of Health, Gauntlets of Ogre Power, etc.)
+  if (itemData.setCon !== undefined && (character.constitution || 10) < itemData.setCon)
+    updates.constitution = itemData.setCon
+  if (itemData.setStr !== undefined && (character.strength || 10) < itemData.setStr)
+    updates.strength = itemData.setStr
+  if (itemData.setInt !== undefined && (character.intelligence || 10) < itemData.setInt)
+    updates.intelligence = itemData.setInt
+  if (itemData.setWis !== undefined && (character.wisdom || 10) < itemData.setWis)
+    updates.wisdom = itemData.setWis
+  if (itemData.setCha !== undefined && (character.charisma || 10) < itemData.setCha)
+    updates.charisma = itemData.setCha
+  if (itemData.setDex !== undefined && (character.dexterity || 10) < itemData.setDex)
+    updates.dexterity = itemData.setDex
+  // HP max bonus (e.g. Ioun Stone of Fortitude)
+  if (itemData.hpBonus) {
+    updates.max_hp      = (character.max_hp || 10) + itemData.hpBonus
+    updates.current_hp  = (character.current_hp || 10) + itemData.hpBonus
+  }
+  return updates
+}
+
+// Returns the stat updates to RESTORE when unequipping an item
+// (reverses any stat changes the item applied)
+export function getUnequipStatUpdates(itemData, character, originalStats) {
+  if (!itemData) return {}
+  const updates = {}
+  // Restore stats that were set by this item, but only if the character's current
+  // value matches what the item would have set (prevents overwriting natural growth)
+  if (itemData.setCon !== undefined && character.constitution === itemData.setCon)
+    updates.constitution = originalStats?.constitution || Math.min(itemData.setCon - 1, character.constitution)
+  if (itemData.setStr !== undefined && character.strength === itemData.setStr)
+    updates.strength = originalStats?.strength || Math.min(itemData.setStr - 1, character.strength)
+  if (itemData.setInt !== undefined && character.intelligence === itemData.setInt)
+    updates.intelligence = originalStats?.intelligence || Math.min(itemData.setInt - 1, character.intelligence)
+  if (itemData.setWis !== undefined && character.wisdom === itemData.setWis)
+    updates.wisdom = originalStats?.wisdom || Math.min(itemData.setWis - 1, character.wisdom)
+  if (itemData.setCha !== undefined && character.charisma === itemData.setCha)
+    updates.charisma = originalStats?.charisma || Math.min(itemData.setCha - 1, character.charisma)
+  if (itemData.hpBonus) {
+    updates.max_hp     = Math.max(1, (character.max_hp || 10) - itemData.hpBonus)
+    updates.current_hp = Math.max(1, (character.current_hp || 10) - itemData.hpBonus)
+  }
+  return updates
 }

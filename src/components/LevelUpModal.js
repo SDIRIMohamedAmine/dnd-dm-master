@@ -8,6 +8,45 @@ const STAT_NAMES = ['strength','dexterity','constitution','intelligence','wisdom
 const STAT_LABELS = { strength:'STR',dexterity:'DEX',constitution:'CON',intelligence:'INT',wisdom:'WIS',charisma:'CHA' }
 const ASI_LEVELS  = new Set([4,8,12,16,19])
 
+const FEATS = [
+  { name: 'Alert',              desc: '+5 initiative. Not surprised. Hidden attackers get no advantage on you.', statBonus: null },
+  { name: 'Athlete',            desc: '+1 STR or DEX. Standing up costs only 5ft. Running jumps from 5ft.', statBonus: 'str_or_dex' },
+  { name: 'Actor',              desc: '+1 CHA. Advantage on Deception and Performance. Mimic sounds and speech.', statBonus: 'charisma' },
+  { name: 'Charger',            desc: 'After Dash, bonus action melee attack (+5 damage) or shove 10ft.', statBonus: null },
+  { name: 'Crossbow Expert',    desc: 'Ignore loading. No disadvantage in melee. Bonus action crossbow attack after one-handed attack.', statBonus: null },
+  { name: 'Defensive Duelist',  desc: 'Reaction: +proficiency to AC vs one melee attack. Requires finesse weapon.', statBonus: null },
+  { name: 'Dual Wielder',       desc: '+1 AC while dual wielding. Use non-light weapons for two-weapon fighting.', statBonus: null },
+  { name: 'Dungeon Delver',     desc: 'Advantage on Perception/Investigation for traps and secret doors. Resist trap damage.', statBonus: null },
+  { name: 'Durable',            desc: '+1 CON. Minimum Hit Die recovery roll = 2×CON mod.', statBonus: 'constitution' },
+  { name: 'Elemental Adept',    desc: 'Choose a damage type. Spells ignore resistance. Treat 1s as 2s on damage rolls.', statBonus: null },
+  { name: 'Great Weapon Master',desc: 'On crit or kill, bonus action attack. Option: -5 attack for +10 damage.', statBonus: null },
+  { name: 'Healer',             desc: "Stabilize brings to 1 HP. Healer's Kit heals 1d6+4+HD once per short rest.", statBonus: null },
+  { name: 'Heavily Armored',    desc: '+1 STR. Proficiency with heavy armor.', statBonus: 'strength' },
+  { name: 'Heavy Armor Master', desc: '+1 STR. Non-magical physical damage reduced by 3 while in heavy armor.', statBonus: 'strength' },
+  { name: 'Inspiring Leader',   desc: '+1 CHA. 10-min speech gives 6 creatures temp HP = level + CHA mod.', statBonus: 'charisma' },
+  { name: 'Keen Mind',          desc: '+1 INT. Know north, sunrise time, and recall anything from last month.', statBonus: 'intelligence' },
+  { name: 'Lucky',              desc: '3 luck points/day. Spend to roll extra d20 and choose result for any attack, save, or check.', statBonus: null },
+  { name: 'Mage Slayer',        desc: 'Reaction: attack creature casting adjacent spell. Advantage on saves vs adjacent spellcasters.', statBonus: null },
+  { name: 'Magic Initiate',     desc: 'Learn 2 cantrips and one 1st-level spell from any class list.', statBonus: null },
+  { name: 'Martial Adept',      desc: 'Learn 2 Battle Master maneuvers and gain 1 superiority die (d6).', statBonus: null },
+  { name: 'Mobile',             desc: '+10ft speed. Dash ignores difficult terrain. No opportunity attacks after you attack.', statBonus: null },
+  { name: 'Observant',          desc: '+1 INT or WIS. Read lips. +5 passive Perception and Investigation.', statBonus: 'int_or_wis' },
+  { name: 'Polearm Master',     desc: 'Bonus action butt-end attack (1d4). Opportunity attack when enemy enters reach.', statBonus: null },
+  { name: 'Resilient',          desc: "+1 to chosen ability. Gain proficiency in that ability's saving throws.", statBonus: 'chosen' },
+  { name: 'Ritual Caster',      desc: 'Learn 2 ritual spells. Cast as rituals without using spell slots.', statBonus: null },
+  { name: 'Savage Attacker',    desc: 'Once per turn, reroll weapon damage dice and take the higher result.', statBonus: null },
+  { name: 'Sentinel',           desc: 'Opportunity attacks stop movement. React to allies being attacked. No Disengage escape.', statBonus: null },
+  { name: 'Sharpshooter',       desc: 'No long-range disadvantage. Ignore half/three-quarters cover. -5 attack for +10 damage option.', statBonus: null },
+  { name: 'Shield Master',      desc: 'Bonus shove after Attack action. Add shield AC to DEX saves. Evasion on DEX saves.', statBonus: null },
+  { name: 'Skilled',            desc: 'Gain proficiency in any 3 skills or tools.', statBonus: null },
+  { name: 'Spell Sniper',       desc: 'Double range of attack spells. Ignore half/three-quarters cover. Learn one attack cantrip.', statBonus: null },
+  { name: 'Tavern Brawler',     desc: '+1 STR or CON. Proficient with improvised weapons. Unarmed 1d4. Bonus action grapple on hit.', statBonus: 'str_or_con' },
+  { name: 'Tough',              desc: 'Max HP +2 per level retroactively, and +2 every future level.', statBonus: null },
+  { name: 'War Caster',         desc: 'Advantage on concentration saves. Somatic components with hands full. Cast spell as opportunity attack.', statBonus: null },
+  { name: 'Weapon Master',      desc: '+1 STR or DEX. Gain proficiency with 4 weapons of your choice.', statBonus: 'str_or_dex' },
+]
+
+
 export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
   const conMod      = Math.floor(((character.constitution || 10) - 10) / 2)
   const hpGain      = hpGainForLevel(character.class, conMod)
@@ -16,9 +55,10 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
   const spellCount  = getSpellsToLearnCount(character.class, newLevel)
   const showASI     = ASI_LEVELS.has(newLevel)
 
-  const [asiMode,       setAsiMode]      = useState('one')
+  const [asiMode,       setAsiMode]      = useState('stat')
   const [asiStat1,      setAsiStat1]     = useState('')
   const [asiStat2,      setAsiStat2]     = useState('')
+  const [chosenFeat,    setChosenFeat]   = useState('')
   const [chosenSpells,  setChosenSpells] = useState([])
   const [chosenSubclass,setChosenSubclass] = useState(character.subclass || '')
   const [saving,        setSaving]       = useState(false)
@@ -49,8 +89,8 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
     if (currentStep === 'subclass' && needsSubclass && !chosenSubclass) return false
     if (currentStep === 'spells' && spellCount > 0 && chosenSpells.length < Math.min(spellCount, availableSpells.length)) return false
     if (currentStep === 'asi' && showASI) {
-      if (asiMode === 'one'  && !asiStat1)            return false
-      if (asiMode === 'two'  && (!asiStat1 || !asiStat2)) return false
+      if (asiMode === 'stat' && !asiStat1)  return false
+      if (asiMode === 'feat' && !chosenFeat) return false
     }
     return true
   }
@@ -74,13 +114,28 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
       updates.spells = [...new Set([...existing, ...chosenSpells])]
     }
 
-    // ASI
+    // ASI or Feat
     if (showASI) {
-      if (asiMode === 'one' && asiStat1) {
-        updates[asiStat1] = Math.min(20, (character[asiStat1] || 10) + 2)
-      } else if (asiMode === 'two' && asiStat1 && asiStat2) {
-        updates[asiStat1] = Math.min(20, (character[asiStat1] || 10) + 1)
-        updates[asiStat2] = Math.min(20, (character[asiStat2] || 10) + 1)
+      if (asiMode === 'stat' && asiStat1) {
+        if (asiStat2) {
+          updates[asiStat1] = Math.min(20, (character[asiStat1] || 10) + 1)
+          updates[asiStat2] = Math.min(20, (character[asiStat2] || 10) + 1)
+        } else {
+          updates[asiStat1] = Math.min(20, (character[asiStat1] || 10) + 2)
+        }
+      } else if (asiMode === 'feat' && chosenFeat) {
+        const feat = FEATS.find(f => f.name === chosenFeat)
+        if (feat?.statBonus === 'constitution') updates.constitution = Math.min(20, (character.constitution || 10) + 1)
+        if (feat?.statBonus === 'strength')     updates.strength     = Math.min(20, (character.strength || 10) + 1)
+        if (feat?.statBonus === 'intelligence') updates.intelligence = Math.min(20, (character.intelligence || 10) + 1)
+        if (feat?.statBonus === 'charisma')     updates.charisma     = Math.min(20, (character.charisma || 10) + 1)
+        if (feat?.statBonus === 'dexterity')    updates.dexterity    = Math.min(20, (character.dexterity || 10) + 1)
+        if (feat?.name === 'Tough') {
+          updates.max_hp     = (character.max_hp || 10) + newLevel * 2
+          updates.current_hp = (character.max_hp || 10) + newLevel * 2
+        }
+        const existing = character.feats || []
+        updates.feats = [...existing, chosenFeat]
       }
     }
 
@@ -223,33 +278,35 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
         {/* ── STEP: ASI ── */}
         {currentStep === 'asi' && (
           <div className="lvlup-body">
-            <h3 className="lvlup-section-title">💪 Ability Score Improvement</h3>
-            <p className="lvlup-spell-sub">Your training pays off. Choose how to improve:</p>
+            <h3 className="lvlup-section-title">💪 Ability Score Improvement or Feat</h3>
+            <p className="lvlup-spell-sub">Choose how to grow at level {newLevel}:</p>
             <div className="lvlup-asi-modes">
-              <button className={`lvlup-asi-mode ${asiMode === 'one' ? 'active' : ''}`} onClick={() => { setAsiMode('one'); setAsiStat2('') }}>
-                +2 to one ability
+              <button className={`lvlup-asi-mode ${asiMode === 'stat' ? 'active' : ''}`}
+                onClick={() => { setAsiMode('stat'); setChosenFeat('') }}>
+                +2 / +1+1 ability
               </button>
-              <button className={`lvlup-asi-mode ${asiMode === 'two' ? 'active' : ''}`} onClick={() => setAsiMode('two')}>
-                +1 to two abilities
+              <button className={`lvlup-asi-mode ${asiMode === 'feat' ? 'active' : ''}`}
+                onClick={() => { setAsiMode('feat'); setAsiStat1(''); setAsiStat2('') }}>
+                ⭐ Take a Feat
               </button>
             </div>
-            <div className="lvlup-asi-pickers">
-              <div className="lvlup-asi-picker">
-                <label>{asiMode === 'one' ? 'Choose stat (+2)' : 'First stat (+1)'}</label>
-                <select className="lvlup-asi-select" value={asiStat1} onChange={e => setAsiStat1(e.target.value)}>
-                  <option value="">Choose…</option>
-                  {STAT_NAMES.map(s => (
-                    <option key={s} value={s} disabled={character[s] >= 20}>
-                      {STAT_LABELS[s]} — currently {character[s] || 10}{character[s] >= 20 ? ' (max)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {asiMode === 'two' && (
+            {asiMode === 'stat' && (
+              <div className="lvlup-asi-pickers">
                 <div className="lvlup-asi-picker">
-                  <label>Second stat (+1)</label>
-                  <select className="lvlup-asi-select" value={asiStat2} onChange={e => setAsiStat2(e.target.value)}>
+                  <label>Primary stat (+2, or +1 if choosing two)</label>
+                  <select className="lvlup-asi-select" value={asiStat1} onChange={e => setAsiStat1(e.target.value)}>
                     <option value="">Choose…</option>
+                    {STAT_NAMES.map(s => (
+                      <option key={s} value={s} disabled={character[s] >= 20}>
+                        {STAT_LABELS[s]} — currently {character[s] || 10}{character[s] >= 20 ? ' (max)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="lvlup-asi-picker">
+                  <label>Second stat +1 (optional)</label>
+                  <select className="lvlup-asi-select" value={asiStat2} onChange={e => setAsiStat2(e.target.value)}>
+                    <option value="">None — give all +2 to first</option>
                     {STAT_NAMES.filter(s => s !== asiStat1).map(s => (
                       <option key={s} value={s} disabled={character[s] >= 20}>
                         {STAT_LABELS[s]} — currently {character[s] || 10}{character[s] >= 20 ? ' (max)' : ''}
@@ -257,8 +314,25 @@ export default function LevelUpModal({ character, newLevel, onSave, onClose }) {
                     ))}
                   </select>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+            {asiMode === 'feat' && (
+              <div style={{marginTop:'10px',maxHeight:'280px',overflowY:'auto',display:'flex',flexDirection:'column',gap:'5px'}}>
+                {FEATS.map(f => (
+                  <button key={f.name}
+                    onClick={() => setChosenFeat(f.name)}
+                    style={{
+                      padding:'8px 10px',borderRadius:'7px',fontSize:'.74rem',cursor:'pointer',textAlign:'left',
+                      border: chosenFeat===f.name ? '1px solid rgba(200,146,42,.6)' : '1px solid rgba(255,255,255,.12)',
+                      background: chosenFeat===f.name ? 'rgba(200,146,42,.12)' : 'transparent',
+                      color: chosenFeat===f.name ? 'var(--gold,#c8922a)' : 'var(--parch,#e8dcc0)',
+                    }}>
+                    <div style={{fontWeight:500}}>{f.name}{f.statBonus ? ' (+1 stat)' : ''}</div>
+                    <div style={{fontSize:'.65rem',opacity:.7,marginTop:'2px'}}>{f.desc}</div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

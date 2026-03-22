@@ -10,7 +10,7 @@ const SCENES = [
   { id: 'combat',   label: 'Tension',  icon: '⚔️' },
 ]
 
-export default function AmbientSound() {
+export default function AmbientSound({ autoScene = null }) {
   const [active,  setActive]  = useState(false)
   const [scene,   setScene]   = useState(() => localStorage.getItem('ambient_scene') || 'dungeon')
   const [volume,  setVolume]  = useState(() => parseFloat(localStorage.getItem('ambient_vol') || '0.4'))
@@ -224,6 +224,13 @@ export default function AmbientSound() {
     const master = nodesRef.current[0]
     if (master && master.gain) master.gain.value = v
   }
+
+  // Auto-switch scene when parent passes a detected location type
+  useEffect(() => {
+    if (autoScene && autoScene !== scene) {
+      switchScene(autoScene)
+    }
+  }, [autoScene]) // eslint-disable-line
 
   useEffect(() => () => stopAll(), []) // eslint-disable-line
 
